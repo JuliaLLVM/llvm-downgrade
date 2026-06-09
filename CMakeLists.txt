@@ -2,18 +2,20 @@ cmake_minimum_required(VERSION 3.20)
 project(llvm-downgrade C CXX)
 
 # Build out-of-tree against a prebuilt LLVM (find_package(LLVM)). The legacy
-# bitcode writers are version-matched to the host LLVM, so we pick the bundled
-# sources for whatever LLVM major version was found.
+# bitcode writers in src/ are forks of LLVM's own BitcodeWriter, adapted to the
+# host LLVM's C++ API, so they are version-specific. This checkout targets one
+# LLVM major version; bump LLVMDG_LLVM_MAJOR and re-extract src/ + include/ from
+# the matching downgrade_release_<major> branch to move to a newer LLVM.
 find_package(LLVM REQUIRED CONFIG)
 
-set(_V ${LLVM_VERSION_MAJOR})
-set(_VDIR ${CMAKE_CURRENT_SOURCE_DIR}/versions/${_V})
-if(NOT IS_DIRECTORY ${_VDIR})
+set(LLVMDG_LLVM_MAJOR 21)
+if(NOT LLVM_VERSION_MAJOR EQUAL LLVMDG_LLVM_MAJOR)
   message(FATAL_ERROR
-    "llvm-downgrade: no legacy bitcode writers bundled for LLVM ${_V} "
-    "(have versions/13 .. versions/22)")
+    "llvm-downgrade's bundled writers are for LLVM ${LLVMDG_LLVM_MAJOR}, but found "
+    "LLVM ${LLVM_VERSION_MAJOR}. Re-extract src/ and include/ from the "
+    "downgrade_release_${LLVM_VERSION_MAJOR} branch to target this LLVM.")
 endif()
-message(STATUS "llvm-downgrade: LLVM ${LLVM_PACKAGE_VERSION}; using versions/${_V}")
+message(STATUS "llvm-downgrade: building against LLVM ${LLVM_PACKAGE_VERSION}")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -21,11 +23,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 list(APPEND CMAKE_MODULE_PATH ${LLVM_CMAKE_DIR})
 include(AddLLVM)
 
-# Our augmented LLVM headers (BitcodeWriter.h with the legacy writer
+# Our augmented LLVM headers (BitcodeWriter.h with the legacy-writer
 # declarations, LLVMBitCodes.h with ATTR_KIND_INVALID, Metadata{50,70}.def) must
 # shadow the installed ones; they are version-matched to the LLVM we link.
-include_directories(BEFORE ${_VDIR}/include)
-include_directories(${_VDIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/common)
+include_directories(BEFORE ${CMAKE_SOURCE_DIR}/include)
+include_directories(${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/common)
 include_directories(${LLVM_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
 
@@ -34,10 +36,10 @@ if(NOT LLVM_ENABLE_RTTI)
 endif()
 
 # Make the de-static'd-opt shim (see common/LegacyOpts.h) visible everywhere.
-add_compile_options(-include ${CMAKE_CURRENT_SOURCE_DIR}/common/LegacyOpts.h)
+add_compile_options(-include ${CMAKE_SOURCE_DIR}/common/LegacyOpts.h)
 
-file(GLOB WRITER_SRCS CONFIGURE_DEPENDS ${_VDIR}/src/*.cpp)
-if(EXISTS ${_VDIR}/src/BitcodeWriter140.cpp)
+file(GLOB WRITER_SRCS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
+if(EXISTS ${CMAKE_SOURCE_DIR}/src/BitcodeWriter140.cpp)
   add_compile_definitions(LLVMDG_HAS_140)
 endif()
 
@@ -47,9 +49,9 @@ add_executable(llvm-downgrade
   ${WRITER_SRCS})
 
 # Default: link the LLVM component static archives, producing a self-contained
-# tool with no runtime libLLVM dependency (matches the historical llvm-as
-# artifact). Set -DLLVMDG_LINK_DYLIB=ON to link the monolithic libLLVM instead
-# (e.g. for local dev against a distro LLVM that only ships the shared lib).
+# tool with no runtime libLLVM dependency. Set -DLLVMDG_LINK_DYLIB=ON to link
+# the monolithic libLLVM instead (e.g. against a distro LLVM that only ships the
+# shared library).
 option(LLVMDG_LINK_DYLIB "Link the monolithic libLLVM shared library" OFF)
 if(LLVMDG_LINK_DYLIB)
   target_link_libraries(llvm-downgrade PRIVATE LLVM)
@@ -61,3 +63,11 @@ else()
 endif()
 
 install(TARGETS llvm-downgrade RUNTIME DESTINATION bin)
+
+# FileCheck-based test suite (see test/). Enabled by default; disable with
+# -DLLVMDG_BUILD_TESTS=OFF.
+option(LLVMDG_BUILD_TESTS "Build the downgrader test suite" ON)
+if(LLVMDG_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(test)
+endif()
