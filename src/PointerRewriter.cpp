@@ -485,6 +485,33 @@ PointerTypeMap PointerRewriter::buildPointerMap(const Module &M) {
   return PointerMap;
 }
 
+// Enumerate the typed pointer types in a deterministic module order (globals,
+// functions, then instructions and their operands), rather than in `PointerMap`'s
+// address-dependent DenseMap order. Every mapped value is a global, a function, an
+// instruction, or an instruction operand, so this reaches them all; repeats are
+// harmless (the ValueEnumerator dedups types).
+SmallVector<TypedPointerType *, 16>
+PointerRewriter::orderedPointerTypes(const Module &M,
+                                     const PointerTypeMap &PointerMap) {
+  SmallVector<TypedPointerType *, 16> Order;
+  auto add = [&](const Value *V) {
+    if (TypedPointerType *Ty = PointerMap.lookup(V))
+      Order.push_back(Ty);
+  };
+  for (const GlobalVariable &GV : M.globals())
+    add(&GV);
+  for (const Function &F : M)
+    add(&F);
+  for (const Function &F : M)
+    for (const BasicBlock &BB : F)
+      for (const Instruction &I : BB) {
+        add(&I);
+        for (const Use &Op : I.operands())
+          add(Op.get());
+      }
+  return Order;
+}
+
 bool PointerRewriter::run() {
   // get rid of constant expressions so that we can more easily rewrite them
   bool Changed = demotePointerConstexprs(M);

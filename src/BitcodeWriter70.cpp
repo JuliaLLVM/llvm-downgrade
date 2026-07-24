@@ -182,10 +182,11 @@ public:
                           const ModuleSummaryIndex *Index)
       : BitcodeWriterBase70(Stream, StrtabBuilder), M(M),
         VE(M, ShouldPreserveUseListOrder), Index(Index) {
-    // Enumerate typed pointers
+    // Enumerate typed pointers, in a deterministic module order so the emitted
+    // type table (and thus the whole bitcode) is reproducible across runs.
     PointerMap = PointerRewriter::buildPointerMap(M);
-    for (auto El : PointerMap)
-      VE.EnumerateType(El.second);
+    for (TypedPointerType *Ty : PointerRewriter::orderedPointerTypes(M, PointerMap))
+      VE.EnumerateType(Ty);
 
     // Assign ValueIds to any callee values in the index that came from
     // indirect call profiles and were recorded as a GUID not a Value*

@@ -15,6 +15,7 @@
 #define LLVM_LIB_BITCODE_LEGACYWRITER_POINTERREWRITER_H
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
 
 namespace llvm {
 
@@ -31,6 +32,14 @@ public:
   bool run();
 
   static PointerTypeMap buildPointerMap(const Module &M);
+
+  // Return the typed pointer types in `PointerMap` in a deterministic module
+  // order. Iterating the DenseMap directly orders types by `Value *` address,
+  // which makes the emitted type table — and thus the whole bitcode — depend on
+  // allocation addresses and so non-reproducible across runs. May repeat types;
+  // the ValueEnumerator dedups them.
+  static SmallVector<TypedPointerType *, 16>
+  orderedPointerTypes(const Module &M, const PointerTypeMap &PointerMap);
 
 private:
   Module &M;

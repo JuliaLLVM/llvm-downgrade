@@ -197,10 +197,11 @@ public:
         GenerateHash(GenerateHash), ModHash(ModHash),
         BitcodeStartBit(Stream.GetCurrentBitNo()) {
 
-    // Enumerate typed pointers
+    // Enumerate typed pointers, in a deterministic module order so the emitted
+    // type table (and thus the whole bitcode) is reproducible across runs.
     PointerMap = PointerRewriter::buildPointerMap(M);
-    for (auto El : PointerMap)
-      VE.EnumerateType(El.second);
+    for (TypedPointerType *Ty : PointerRewriter::orderedPointerTypes(M, PointerMap))
+      VE.EnumerateType(Ty);
 
     // imitate Metal by having one llvm.dbg.cu entry per DISubprogram
     if (auto dbg_cu = M.getNamedMetadata("llvm.dbg.cu"); dbg_cu) {
