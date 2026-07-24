@@ -2682,11 +2682,17 @@ void ModuleBitcodeWriter140::writeConstants(unsigned FirstVal, unsigned LastVal,
               CDS->getElementAsAPFloat(i).bitcastToAPInt().getLimitedValue());
       }
     } else if (isa<ConstantAggregate>(C)) {
+      if (PointerRewriter::requiresPointerRewriting(C))
+        report_fatal_error("pointers in constant aggregates are not yet supported by the IR downgrader", false);
+
       Code = bitc::CST_CODE_AGGREGATE;
       for (const Value *Op : C->operands())
         Record.push_back(VE.getValueID(Op));
       AbbrevToUse = AggregateAbbrev;
     } else if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(C)) {
+      if (PointerRewriter::requiresPointerRewriting(C))
+        report_fatal_error("pointers in constant expressions are not supported by the IR downgrader", false);
+
       switch (CE->getOpcode()) {
       default:
         if (Instruction::isCast(CE->getOpcode())) {

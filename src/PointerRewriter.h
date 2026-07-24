@@ -19,6 +19,7 @@
 
 namespace llvm {
 
+class Constant;
 class Value;
 class Module;
 class TypedPointerType;
@@ -32,6 +33,7 @@ public:
   bool run();
 
   static PointerTypeMap buildPointerMap(const Module &M);
+  static bool requiresPointerRewriting(const Constant *C);
 
   // Return the typed pointer types in `PointerMap` in a deterministic module
   // order. Iterating the DenseMap directly orders types by `Value *` address,

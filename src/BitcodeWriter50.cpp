@@ -2386,10 +2386,7 @@ void ModuleBitcodeWriter50::writeConstants(unsigned FirstVal, unsigned LastVal,
               CDS->getElementAsAPFloat(i).bitcastToAPInt().getLimitedValue());
       }
     } else if (isa<ConstantAggregate>(C)) {
-      // XXX: how do support, e.g., `@global = [1 x ptr] [ptr @fun]`? we'd need
-      //      bitcast CEs, e.g., `[i8* bitcast (void ()* @fun to i8*)]`...
-      if (LastTy->isPtrOrPtrVectorTy() ||
-          (LastTy->isArrayTy() && LastTy->getArrayElementType()->isPtrOrPtrVectorTy()))
+      if (PointerRewriter::requiresPointerRewriting(C))
           report_fatal_error("pointers in constant aggregates are not yet supported by the IR downgrader", false);
 
       Code = bitc::CST_CODE_AGGREGATE;
@@ -2397,10 +2394,7 @@ void ModuleBitcodeWriter50::writeConstants(unsigned FirstVal, unsigned LastVal,
         Record.push_back(VE.getValueID(Op));
       AbbrevToUse = AggregateAbbrev;
     } else if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(C)) {
-      // we don't support constant expressions because we cannot rewrite them,
-      // so instead we rely on them being demoted to instructions beforehand.
-      if (LastTy->isPtrOrPtrVectorTy() ||
-          (LastTy->isArrayTy() && LastTy->getArrayElementType()->isPtrOrPtrVectorTy()))
+      if (PointerRewriter::requiresPointerRewriting(C))
           report_fatal_error("pointers in constant expressions are not supported by the IR downgrader", false);
 
       switch (CE->getOpcode()) {

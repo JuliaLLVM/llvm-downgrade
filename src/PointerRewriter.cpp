@@ -41,37 +41,72 @@
 // cannot be inferred from the IR.
 
 #include "PointerRewriter.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/ReplaceConstant.h"
 #include "llvm/IR/TypedPointerType.h"
 using namespace llvm;
 
-// Demote all constant expressions that produce pointers, to their
-// corresponding instructions so that we can more easily rewrite them.
-static bool demotePointerConstexprs(Module &M) {
-  SmallVector<std::pair<Instruction *, int>, 8> Worklist;
+static bool requiresPointerRewriting(const Constant *C,
+                                     SmallPtrSetImpl<const Constant *> &Seen) {
+  if (!Seen.insert(C).second)
+    return false;
+
+  if (isa<ConstantPointerNull, UndefValue, PoisonValue>(C))
+    return false;
+
+  if (C->getType()->isPtrOrPtrVectorTy() &&
+      (isa<GlobalValue, BlockAddress, ConstantExpr>(C)))
+    return true;
+
+  for (const Value *Op : C->operands())
+    if (const auto *OpC = dyn_cast<Constant>(Op))
+      if (requiresPointerRewriting(OpC, Seen))
+        return true;
+  return false;
+}
+
+bool PointerRewriter::requiresPointerRewriting(const Constant *C) {
+  SmallPtrSet<const Constant *, 8> Seen;
+  return ::requiresPointerRewriting(C, Seen);
+}
+
+// Materialize function-local constants whose pointer operands need typed
+// reconstruction. LLVM's utility handles nested aggregates, PHI placement, and
+// shared constants without violating dominance.
+static void collectPointerConstants(Constant *C,
+                                    SmallPtrSetImpl<Constant *> &Seen,
+                                    SmallVectorImpl<Constant *> &Worklist) {
+  if (!Seen.insert(C).second || !PointerRewriter::requiresPointerRewriting(C))
+    return;
+
+  if (!isa<ConstantExpr, ConstantAggregate>(C))
+    return;
+
+  Worklist.push_back(C);
+  for (Value *Op : C->operands())
+    if (auto *OpC = dyn_cast<Constant>(Op))
+      collectPointerConstants(OpC, Seen, Worklist);
+}
+
+static bool demotePointerConstants(Module &M) {
+  SmallVector<Constant *, 8> Worklist;
+  SmallPtrSet<Constant *, 8> Seen;
   for (Function &F : M)
     for (BasicBlock &BB : F)
       for (Instruction &I : BB)
         for (const Use &Op : I.operands())
-          if (auto *CE = dyn_cast<ConstantExpr>(Op))
-            Worklist.push_back({&I, Op.getOperandNo()});
+          if (auto *C = dyn_cast<Constant>(Op))
+            collectPointerConstants(C, Seen, Worklist);
   if (Worklist.empty())
     return false;
 
-  for (auto Item : Worklist) {
-    Instruction *I = Item.first;
-    int OpIdx = Item.second;
-    ConstantExpr *CE = cast<ConstantExpr>(I->getOperand(OpIdx));
-    Instruction *NewI = CE->getAsInstruction();
-    NewI->insertBefore(I);
-    I->setOperand(OpIdx, NewI);
-  }
-  return true;
+  return convertUsersOfConstantsToInstructions(Worklist, nullptr, true, true);
 }
 
 // determine the typed function type based on !arg_eltypes metadata
@@ -513,8 +548,7 @@ PointerRewriter::orderedPointerTypes(const Module &M,
 }
 
 bool PointerRewriter::run() {
-  // get rid of constant expressions so that we can more easily rewrite them
-  bool Changed = demotePointerConstexprs(M);
+  bool Changed = demotePointerConstants(M);
 
   // insert no-op bitcasts surrounding pointer values
   Changed |= bitcastGlobals(M);
