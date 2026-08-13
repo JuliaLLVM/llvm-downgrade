@@ -8,7 +8,7 @@ project(llvm-downgrade C CXX)
 # the matching downgrade_release_<major> branch to move to a newer LLVM.
 find_package(LLVM REQUIRED CONFIG)
 
-set(LLVMDG_LLVM_MAJOR 21)
+set(LLVMDG_LLVM_MAJOR 22)
 if(NOT LLVM_VERSION_MAJOR EQUAL LLVMDG_LLVM_MAJOR)
   message(FATAL_ERROR
     "llvm-downgrade's bundled writers are for LLVM ${LLVMDG_LLVM_MAJOR}, but found "

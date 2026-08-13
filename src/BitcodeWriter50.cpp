@@ -25,6 +25,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/Bitcode/BitcodeCommon.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/LLVMBitCodes.h"
@@ -229,7 +230,7 @@ public:
       return;
     for (const auto &GUIDSummaryLists : *Index)
       // Examine all summaries for this GUID.
-      for (auto &Summary : GUIDSummaryLists.second.SummaryList)
+      for (auto &Summary : GUIDSummaryLists.second.getSummaryList())
         if (auto FS = dyn_cast<FunctionSummary>(Summary.get()))
           // For each call in the function summary, see if the call
           // is to a GUID (which means it is for an indirect call,
@@ -446,7 +447,7 @@ public:
           Callback(Summary);
     } else {
       for (auto &Summaries : Index)
-        for (auto &Summary : Summaries.second.SummaryList)
+        for (auto &Summary : Summaries.second.getSummaryList())
           Callback({Summaries.first, Summary.get()});
     }
   }
@@ -1628,12 +1629,27 @@ void ModuleBitcodeWriter50::writeDIFile(const DIFile *N,
   Record.clear();
 }
 
+// LLVM 22 wraps the compile unit's language in DISourceLanguageName, which
+// can carry a versioned DWARF 6 DW_LNAME code. Legacy bitcode stores a plain
+// DW_LANG code, so map versioned names back, keeping the raw name for
+// languages with no DW_LANG equivalent.
+static uint64_t getLegacySourceLanguage(const DICompileUnit *N) {
+  DISourceLanguageName Lang = N->getSourceLanguage();
+  if (!Lang.hasVersionedName())
+    return Lang.getName();
+  if (std::optional<dwarf::SourceLanguage> DWLang = dwarf::toDW_LANG(
+          static_cast<dwarf::SourceLanguageName>(Lang.getName()),
+          Lang.getVersion()))
+    return *DWLang;
+  return Lang.getName();
+}
+
 void ModuleBitcodeWriter50::writeDICompileUnit(const DICompileUnit *N,
                                              SmallVectorImpl<uint64_t> &Record,
                                              unsigned Abbrev) {
   assert(N->isDistinct() && "Expected distinct compile units");
   Record.push_back(/* IsDistinct */ true);
-  Record.push_back(N->getSourceLanguage());
+  Record.push_back(getLegacySourceLanguage(N));
   Record.push_back(VE.getMetadataOrNullID(N->getFile()));
   Record.push_back(VE.getMetadataOrNullID(N->getRawProducer()));
   Record.push_back(N->isOptimized());
@@ -4051,7 +4067,7 @@ void BitcodeWriter50::writeSymtab() {
 
     std::string Err;
     const Triple TT(M->getTargetTriple());
-    const Target *T = TargetRegistry::lookupTarget(TT.str(), Err);
+    const Target *T = TargetRegistry::lookupTarget(TT, Err);
     if (!T || !T->hasMCAsmParser())
       return;
   }
