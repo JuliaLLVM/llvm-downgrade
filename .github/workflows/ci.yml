@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: LLVM ${{ matrix.target }} bitcode
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: '5.0'
+            dis_product: llvm_dis_5_path
+            dis_option: LLVMDG_DIS_5_0
+          - target: '7.0'
+            dis_product: llvm_dis_7_path
+            dis_option: LLVMDG_DIS_7_0
+          - target: '14.0'
+            dis_product: llvm_dis_14_path
+            dis_option: LLVMDG_DIS_14_0
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 22
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
+          sudo apt-get install -y llvm-22-dev llvm-22-tools ninja-build
+
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+
+      - uses: julia-actions/cache@v2
+
+      - name: Fetch legacy disassemblers
+        env:
+          DIS_PRODUCT: ${{ matrix.dis_product }}
+        run: |
+          julia -e '
+            using Pkg
+            Pkg.activate(; temp=true)
+            Pkg.add("LLVMDowngrader_jll")
+            using LLVMDowngrader_jll
+            open(ENV["GITHUB_ENV"], "a") do io
+                println(io, "DIS=", getproperty(LLVMDowngrader_jll,
+                                                Symbol(ENV["DIS_PRODUCT"])))
+            end'
+
+      - name: Check legacy disassembler
+        run: |
+          "$DIS" --version
+
+      - name: Configure
+        env:
+          DIS_OPTION: ${{ matrix.dis_option }}
+        run: |
+          cmake -B build -S . -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR=/usr/lib/llvm-22/lib/cmake/llvm \
+            -D"$DIS_OPTION=$DIS"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
