@@ -26,6 +26,15 @@ jobs:
           - target: '14.0'
             dis_product: llvm_dis_14_path
             dis_option: LLVMDG_DIS_14_0
+          # LLVMDowngrader_jll does not ship llvm-dis-15/-18 until v0.9, so the
+          # 15.0/18.0 disassemblers come from the upstream releases via
+          # LLVM_full_jll instead (which only makes them a better oracle).
+          - target: '15.0'
+            llvm_full: '15.0.7'
+            dis_option: LLVMDG_DIS_15_0
+          - target: '18.0'
+            llvm_full: '18.1.7'
+            dis_option: LLVMDG_DIS_18_0
 
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +50,8 @@ jobs:
 
       - uses: julia-actions/cache@v2
 
-      - name: Fetch legacy disassemblers
+      - name: Fetch legacy disassembler (LLVMDowngrader_jll)
+        if: matrix.dis_product
         env:
           DIS_PRODUCT: ${{ matrix.dis_product }}
         run: |
@@ -53,6 +63,21 @@ jobs:
             open(ENV["GITHUB_ENV"], "a") do io
                 println(io, "DIS=", getproperty(LLVMDowngrader_jll,
                                                 Symbol(ENV["DIS_PRODUCT"])))
+            end'
+
+      - name: Fetch legacy disassembler (LLVM_full_jll)
+        if: matrix.llvm_full
+        env:
+          LLVM_FULL_VERSION: ${{ matrix.llvm_full }}
+        run: |
+          julia -e '
+            using Pkg
+            Pkg.activate(; temp=true)
+            Pkg.add(name="LLVM_full_jll", version=ENV["LLVM_FULL_VERSION"])
+            using LLVM_full_jll
+            open(ENV["GITHUB_ENV"], "a") do io
+                println(io, "DIS=", joinpath(LLVM_full_jll.artifact_dir,
+                                             "tools", "llvm-dis"))
             end'
 
       - name: Check legacy disassembler
