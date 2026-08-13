@@ -142,6 +142,9 @@ public:
   ValueEnumerator180(const ValueEnumerator180 &) = delete;
   ValueEnumerator180 &operator=(const ValueEnumerator180 &) = delete;
 
+  //! signals that an attribute group id is invalid / should not be used
+  static constexpr const uint32_t invalid_attribute_group_id = 0x7FFF'FFFFu;
+
   void dump() const;
   void print(raw_ostream &OS, const ValueMapType &Map, const char *Name) const;
   void print(raw_ostream &OS, const MetadataMapType &Map,
@@ -183,7 +186,11 @@ public:
     if (!Group.second.hasAttributes())
       return 0; // Null maps to zero.
     AttributeGroupMapType::const_iterator I = AttributeGroupMap.find(Group);
-    assert(I != AttributeGroupMap.end() && "Attribute not in ValueEnumerator180!");
+    // A group that only exists under invalid_attribute_group_id (because it
+    // has no LLVM 18 encoding) misses here; tell the caller to drop it.
+    if (I == AttributeGroupMap.end()) {
+      return invalid_attribute_group_id;
+    }
     return I->second;
   }
 

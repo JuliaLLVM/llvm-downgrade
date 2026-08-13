@@ -615,7 +615,13 @@ static unsigned getEncodedBinaryOpcode(unsigned Opcode) {
 
 static unsigned getEncodedRMWOperation(AtomicRMWInst::BinOp Op) {
   switch (Op) {
-  default: llvm_unreachable("Unknown RMW operation!");
+  default:
+    // Operations introduced after LLVM 18 (usub_cond/usub_sat in 20) have no
+    // encoding its reader accepts; fail loudly instead of emitting garbage.
+    report_fatal_error(Twine("unsupported atomicrmw operation for the "
+                             "requested bitcode version: ") +
+                           AtomicRMWInst::getOperationName(Op),
+                       false);
   case AtomicRMWInst::Xchg: return bitc::RMW_XCHG;
   case AtomicRMWInst::Add: return bitc::RMW_ADD;
   case AtomicRMWInst::Sub: return bitc::RMW_SUB;
@@ -666,8 +672,14 @@ static void writeStringRecord(BitstreamWriter &Stream, unsigned Code,
   Stream.EmitRecord(Code, Vals, AbbrevToUse);
 }
 
+// Returns ATTR_KIND_INVALID for attribute kinds with no LLVM 18 encoding
+// (those introduced later); the caller drops them. captures is handled by
+// encodeAttribute180 before this table is consulted, since its modern
+// representation needs translation rather than a 1:1 code mapping.
 static uint64_t getAttrKindEncoding180(Attribute::AttrKind Kind) {
   switch (Kind) {
+  default:
+    return bitc::ATTR_KIND_INVALID;
   case Attribute::Alignment:
     return bitc::ATTR_KIND_ALIGNMENT;
   case Attribute::AllocAlign:
@@ -842,16 +854,87 @@ static uint64_t getAttrKindEncoding180(Attribute::AttrKind Kind) {
     return bitc::ATTR_KIND_CORO_ONLY_DESTROY_WHEN_COMPLETE;
   case Attribute::DeadOnUnwind:
     return bitc::ATTR_KIND_DEAD_ON_UNWIND;
-  case Attribute::EndAttrKinds:
-    llvm_unreachable("Can not encode end-attribute kinds marker.");
-  case Attribute::None:
-    llvm_unreachable("Can not encode none-attribute.");
-  case Attribute::EmptyKey:
-  case Attribute::TombstoneKey:
-    llvm_unreachable("Trying to encode EmptyKey/TombstoneKey");
+  }
+}
+
+// Append the LLVM 18 encoding of Attr to Record, returning how many attribute
+// entries were emitted. A null Record only counts (VE may then be null too).
+// ValueEnumerator180 uses the counting mode (via countEncodableAttrs180) to
+// decide which attribute groups exist at all, so the two must agree exactly: a
+// group is dropped if and only if the writer would emit an empty record for it
+// (which the LLVM 18 reader rejects).
+unsigned encodeAttribute180(const Attribute &Attr,
+                            SmallVectorImpl<uint64_t> *Record,
+                            const ValueEnumerator180 *VE) {
+  auto Emit = [&](std::initializer_list<uint64_t> Vals) {
+    if (Record)
+      Record->append(Vals);
+  };
+
+  // LLVM 18 has no captures(...) attribute; it only knows the legacy
+  // standalone "nocapture" enum attribute. Emit it when the pointer is
+  // not captured at all; otherwise drop the (conservative) hint.
+  if (Attr.hasAttribute(Attribute::Captures)) {
+    if (!capturesNothing(Attr.getCaptureInfo()))
+      return 0;
+    Emit({0, bitc::ATTR_KIND_NO_CAPTURE});
+    return 1;
   }
 
-  llvm_unreachable("Trying to encode unknown attribute");
+  if (Attr.isEnumAttribute() || Attr.isIntAttribute()) {
+    // Attribute kinds introduced after LLVM 18 (sanitize_numerical_stability,
+    // dead_on_return, nocreateundeforpoison, ...) have no LLVM 18 encoding;
+    // they are optimization hints, so drop them.
+    const uint64_t Enc = getAttrKindEncoding180(Attr.getKindAsEnum());
+    if (Enc == bitc::ATTR_KIND_INVALID)
+      return 0;
+    if (Attr.isEnumAttribute())
+      Emit({0, Enc});
+    else
+      Emit({1, Enc, Attr.getValueAsInt()});
+    return 1;
+  }
+
+  if (Attr.isStringAttribute()) {
+    if (Record) {
+      StringRef Kind = Attr.getKindAsString();
+      StringRef Val = Attr.getValueAsString();
+
+      Record->push_back(Val.empty() ? 3 : 4);
+      Record->append(Kind.begin(), Kind.end());
+      Record->push_back(0);
+      if (!Val.empty()) {
+        Record->append(Val.begin(), Val.end());
+        Record->push_back(0);
+      }
+    }
+    return 1;
+  }
+
+  if (Attr.isTypeAttribute()) {
+    const uint64_t Enc = getAttrKindEncoding180(Attr.getKindAsEnum());
+    if (Enc == bitc::ATTR_KIND_INVALID)
+      return 0;
+    Type *Ty = Attr.getValueAsType();
+    if (Record) {
+      Record->push_back(Ty ? 6 : 5);
+      Record->push_back(Enc);
+      if (Ty)
+        Record->push_back(VE->getTypeID(Ty));
+    }
+    return 1;
+  }
+
+  // Remaining kinds (the ConstantRange(-list) attributes range/initializes)
+  // have no LLVM 18 encoding; drop.
+  return 0;
+}
+
+unsigned countEncodableAttrs180(const AttributeSet &AS) {
+  unsigned N = 0;
+  for (Attribute Attr : AS)
+    N += encodeAttribute180(Attr, nullptr, nullptr);
+  return N;
 }
 
 void ModuleBitcodeWriter180::writeAttributeGroupTable() {
@@ -863,49 +946,17 @@ void ModuleBitcodeWriter180::writeAttributeGroupTable() {
 
   SmallVector<uint64_t, 64> Record;
   for (ValueEnumerator180::IndexAndAttrSet Pair : AttrGrps) {
+    if (Pair.first == ValueEnumerator180::invalid_attribute_group_id) {
+      // this complete set/group can't be encoded for 18.0
+      continue;
+    }
     unsigned AttrListIndex = Pair.first;
     AttributeSet AS = Pair.second;
     Record.push_back(VE.getAttributeGroupID(Pair));
     Record.push_back(AttrListIndex);
 
-    for (Attribute Attr : AS) {
-      if (Attr.hasAttribute(Attribute::Captures)) {
-        // LLVM 18 has no captures(...) attribute; it only knows the legacy
-        // standalone "nocapture" enum attribute. Emit it when the pointer is
-        // not captured at all; otherwise drop the (conservative) hint.
-        if (capturesNothing(Attr.getCaptureInfo())) {
-          Record.push_back(0);
-          Record.push_back(bitc::ATTR_KIND_NO_CAPTURE);
-        }
-      } else if (Attr.isEnumAttribute()) {
-        Record.push_back(0);
-        Record.push_back(getAttrKindEncoding180(Attr.getKindAsEnum()));
-      } else if (Attr.isIntAttribute()) {
-        Record.push_back(1);
-        Record.push_back(getAttrKindEncoding180(Attr.getKindAsEnum()));
-        Record.push_back(Attr.getValueAsInt());
-      } else if (Attr.isStringAttribute()) {
-        StringRef Kind = Attr.getKindAsString();
-        StringRef Val = Attr.getValueAsString();
-
-        Record.push_back(Val.empty() ? 3 : 4);
-        Record.append(Kind.begin(), Kind.end());
-        Record.push_back(0);
-        if (!Val.empty()) {
-          Record.append(Val.begin(), Val.end());
-          Record.push_back(0);
-        }
-      } else if (Attr.isTypeAttribute()) {
-        Type *Ty = Attr.getValueAsType();
-        Record.push_back(Ty ? 6 : 5);
-        Record.push_back(getAttrKindEncoding180(Attr.getKindAsEnum()));
-        if (Ty)
-          Record.push_back(VE.getTypeID(Attr.getValueAsType()));
-      } else {
-        // Attribute kinds introduced after LLVM 18 (range/initializes/captures)
-        // have no LLVM 18 encoding; they are optimization hints, so drop them.
-      }
-    }
+    for (Attribute Attr : AS)
+      encodeAttribute180(Attr, &Record, &VE);
 
     Stream.EmitRecord(bitc::PARAMATTR_GRP_CODE_ENTRY, Record);
     Record.clear();
@@ -925,7 +976,9 @@ void ModuleBitcodeWriter180::writeAttributeTable() {
     for (unsigned i : AL.indexes()) {
       AttributeSet AS = AL.getAttributes(i);
       if (AS.hasAttributes())
-        Record.push_back(VE.getAttributeGroupID({i, AS}));
+        if (const auto group_id = VE.getAttributeGroupID({i, AS});
+            group_id != ValueEnumerator180::invalid_attribute_group_id)
+          Record.push_back(group_id);
     }
 
     Stream.EmitRecord(bitc::PARAMATTR_CODE_ENTRY, Record);
