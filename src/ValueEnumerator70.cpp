@@ -918,7 +918,9 @@ void ValueEnumerator70::EnumerateOperandType(const Value *V) {
   }
 }
 
-extern uint64_t getAttrKindEncoding70(Attribute::AttrKind Kind);
+// Defined in BitcodeWriter70.cpp; counts how many attribute entries the writer
+// will emit for AS, so that unencodable groups can be dropped consistently.
+extern unsigned countEncodableAttrs70(const AttributeSet &AS);
 void ValueEnumerator70::EnumerateAttributes(AttributeList PAL) {
   if (PAL.isEmpty()) return;  // null is always 0.
 
@@ -935,28 +937,12 @@ void ValueEnumerator70::EnumerateAttributes(AttributeList PAL) {
     AttributeSet AS = PAL.getAttributes(i);
     if (!AS.hasAttributes())
       continue;
-    // we need to skip attribute sets that don't have any valid LLVM 7.0 encoding
-    bool has_any_valid_attr = false;
-    for (Attribute Attr : AS) {
-      if (Attr.isEnumAttribute() || Attr.isIntAttribute()) {
-        if (getAttrKindEncoding70(Attr.getKindAsEnum()) > 0) {
-          has_any_valid_attr = true;
-          break;
-        }
-      } else if (Attr.isStringAttribute()) {
-        has_any_valid_attr = true;
-        break;
-      } else if (Attr.isTypeAttribute()) {
-        if (Attr.getKindAsEnum() == Attribute::ByVal) {
-          has_any_valid_attr = true;
-          break;
-        }
-        // else: ignore all other type attributes
-      }
-      // else: ignore
-    }
+    // Skip attribute sets for which the writer would emit an empty group
+    // record (which the LLVM 7.0 reader rejects). countEncodableAttrs70 is the
+    // counting mode of the writer's own encoding function, so the two cannot
+    // drift apart.
     auto AS_index = i;
-    if (!has_any_valid_attr) {
+    if (countEncodableAttrs70(AS) == 0) {
       AS_index = invalid_attribute_group_id;
     }
 

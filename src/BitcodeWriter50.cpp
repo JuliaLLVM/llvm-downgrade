@@ -537,7 +537,14 @@ static unsigned getEncodedBinaryOpcode(unsigned Opcode) {
 
 static unsigned getEncodedRMWOperation(AtomicRMWInst::BinOp Op) {
   switch (Op) {
-  default: llvm_unreachable("Unknown RMW operation!");
+  default:
+    // Operations introduced after this format (fadd/fsub in LLVM 9, fmax/fmin
+    // in 15, uinc/udec_wrap in 16, usub_cond/usub_sat in 20) have no encoding
+    // the legacy reader accepts; fail loudly instead of emitting garbage.
+    report_fatal_error(Twine("unsupported atomicrmw operation for the "
+                             "requested bitcode version: ") +
+                           AtomicRMWInst::getOperationName(Op),
+                       false);
   case AtomicRMWInst::Xchg: return bitc::RMW_XCHG;
   case AtomicRMWInst::Add: return bitc::RMW_ADD;
   case AtomicRMWInst::Sub: return bitc::RMW_SUB;
@@ -676,8 +683,6 @@ uint64_t getAttrKindEncoding50(Attribute::AttrKind Kind) {
     return bitc::ATTR_KIND_SWIFT_ERROR;
   case Attribute::SwiftSelf:
     return bitc::ATTR_KIND_SWIFT_SELF;
-  case Attribute::UWTable:
-    report_fatal_error("uwtable attribute is not supported in 5.0", false);
   case Attribute::WriteOnly:
     return bitc::ATTR_KIND_WRITEONLY;
   case Attribute::ZExt:
@@ -689,6 +694,122 @@ uint64_t getAttrKindEncoding50(Attribute::AttrKind Kind) {
   }
 
   llvm_unreachable("Trying to encode unknown attribute");
+}
+
+// Append the LLVM 5.0 encoding of Attr to Record, returning how many attribute
+// entries were emitted. A null Record only counts. ValueEnumerator50 uses the
+// counting mode (via countEncodableAttrs50) to decide which attribute groups
+// exist at all, so the two must agree exactly: a group is dropped if and only
+// if the writer would emit an empty record for it.
+unsigned encodeAttribute50(const Attribute &Attr,
+                           SmallVectorImpl<uint64_t> *Record) {
+  auto Emit = [&](std::initializer_list<uint64_t> Vals) {
+    if (Record)
+      Record->append(Vals);
+  };
+
+  // The memory(...) attribute postdates 5.0; decompose the MemoryEffects into
+  // the legacy standalone enum attributes the 5.0 reader (and verifier) knows.
+  if (Attr.hasAttribute(Attribute::Memory)) {
+    unsigned N = 0;
+    MemoryEffects ME = Attr.getMemoryEffects();
+    auto EmitEnum = [&](uint64_t Code) {
+      Emit({0, Code});
+      ++N;
+    };
+    if (ME.doesNotAccessMemory())
+      EmitEnum(bitc::ATTR_KIND_READ_NONE);
+    else {
+      if (ME.onlyReadsMemory())
+        EmitEnum(bitc::ATTR_KIND_READ_ONLY);
+      else if (ME.onlyWritesMemory())
+        EmitEnum(bitc::ATTR_KIND_WRITEONLY);
+      if (ME.onlyAccessesArgPointees())
+        EmitEnum(bitc::ATTR_KIND_ARGMEMONLY);
+      else if (ME.onlyAccessesInaccessibleMem())
+        EmitEnum(bitc::ATTR_KIND_INACCESSIBLEMEM_ONLY);
+      else if (ME.onlyAccessesInaccessibleOrArgMem())
+        EmitEnum(bitc::ATTR_KIND_INACCESSIBLEMEM_OR_ARGMEMONLY);
+    }
+    return N;
+  }
+
+  // LLVM 21 replaced nocapture with the richer captures(...) attribute. LLVM
+  // 5.0 only has nocapture, equivalent to captures(none); drop any weaker
+  // capture information.
+  if (Attr.hasAttribute(Attribute::Captures)) {
+    if (!capturesNothing(Attr.getCaptureInfo()))
+      return 0;
+    Emit({0, bitc::ATTR_KIND_NO_CAPTURE});
+    return 1;
+  }
+
+  // uwtable became an int attribute (sync/async) in LLVM 15. Both kinds ask
+  // codegen for unwind tables, which is also what the legacy plain uwtable
+  // does, so emit that rather than dropping the attribute.
+  if (Attr.hasAttribute(Attribute::UWTable)) {
+    Emit({0, bitc::ATTR_KIND_UW_TABLE});
+    return 1;
+  }
+
+  if (Attr.isEnumAttribute() || Attr.isIntAttribute()) {
+    // only encode attributes that are supported by LLVM 5.0
+    const uint64_t Enc = getAttrKindEncoding50(Attr.getKindAsEnum());
+    if (Enc == bitc::ATTR_KIND_INVALID)
+      return 0;
+    if (Attr.isEnumAttribute())
+      Emit({0, Enc});
+    else
+      Emit({1, Enc, Attr.getValueAsInt()});
+    return 1;
+  }
+
+  if (Attr.isStringAttribute()) {
+    if (Record) {
+      StringRef Kind = Attr.getKindAsString();
+      StringRef Val = Attr.getValueAsString();
+
+      Record->push_back(Val.empty() ? 3 : 4);
+      Record->append(Kind.begin(), Kind.end());
+      Record->push_back(0);
+      if (!Val.empty()) {
+        Record->append(Val.begin(), Val.end());
+        Record->push_back(0);
+      }
+    }
+    return 1;
+  }
+
+  if (Attr.isTypeAttribute()) {
+    // Type attributes postdate 5.0, but byval/sret/inalloca exist there as
+    // plain enum attributes: the payload type is implied by the pointer
+    // element type of the parameter, which the PointerRewriter reconstructs
+    // from these same attributes.
+    switch (Attr.getKindAsEnum()) {
+    case Attribute::ByVal:
+      Emit({0, bitc::ATTR_KIND_BY_VAL});
+      return 1;
+    case Attribute::StructRet:
+      Emit({0, bitc::ATTR_KIND_STRUCT_RET});
+      return 1;
+    case Attribute::InAlloca:
+      Emit({0, bitc::ATTR_KIND_IN_ALLOCA});
+      return 1;
+    default: // byref/preallocated/elementtype have no 5.0 equivalent.
+      return 0;
+    }
+  }
+
+  // Remaining kinds (the ConstantRange(-list) attributes range/initializes)
+  // are pure optimization hints with no legacy encoding.
+  return 0;
+}
+
+unsigned countEncodableAttrs50(const AttributeSet &AS) {
+  unsigned N = 0;
+  for (Attribute Attr : AS)
+    N += encodeAttribute50(Attr, nullptr);
+  return N;
 }
 
 void ModuleBitcodeWriter50::writeAttributeGroupTable() {
@@ -709,52 +830,8 @@ void ModuleBitcodeWriter50::writeAttributeGroupTable() {
     Record.push_back(VE.getAttributeGroupID(Pair));
     Record.push_back(AttrListIndex);
 
-    for (Attribute Attr : AS) {
-      if (Attr.isEnumAttribute() || Attr.isIntAttribute()) {
-        // LLVM 21 replaced nocapture with the richer captures(...) attribute.
-        // LLVM 5.0 only has nocapture, equivalent to captures(none); drop any
-        // weaker capture information.
-        if (Attr.getKindAsEnum() == Attribute::Captures) {
-          if (Attr.getValueAsInt() == CaptureInfo::none().toIntValue()) {
-            Record.push_back(0);
-            Record.push_back(bitc::ATTR_KIND_NO_CAPTURE);
-          }
-          continue;
-        }
-        // only encode attributes that are supported by LLVM 5.0
-        const auto enc_attr = getAttrKindEncoding50(Attr.getKindAsEnum());
-        if (enc_attr != llvm::bitc::ATTR_KIND_INVALID) {
-          if (Attr.isEnumAttribute()) {
-            Record.push_back(0);
-            Record.push_back(enc_attr);
-          } else {
-            Record.push_back(1);
-            Record.push_back(enc_attr);
-            Record.push_back(Attr.getValueAsInt());
-          }
-        }
-      } else if (Attr.isStringAttribute()) {
-        StringRef Kind = Attr.getKindAsString();
-        StringRef Val = Attr.getValueAsString();
-
-        Record.push_back(Val.empty() ? 3 : 4);
-        Record.append(Kind.begin(), Kind.end());
-        Record.push_back(0);
-        if (!Val.empty()) {
-          Record.append(Val.begin(), Val.end());
-          Record.push_back(0);
-        }
-      } else {
-        assert(Attr.isTypeAttribute());
-        // type attributes are not supported by LLVM 5.0, but we do want to encode byval
-        if (Attr.getKindAsEnum() == Attribute::ByVal) {
-          const auto enc_attr = getAttrKindEncoding50(Attr.getKindAsEnum());
-          Record.push_back(0);
-          Record.push_back(enc_attr);
-          // the byval type is not supported by LLVM 5.0
-        }
-      }
-    }
+    for (Attribute Attr : AS)
+      encodeAttribute50(Attr, &Record);
 
     Stream.EmitRecord(bitc::PARAMATTR_GRP_CODE_ENTRY, Record);
     Record.clear();
@@ -1149,7 +1226,10 @@ void ModuleBitcodeWriter50::writeModuleInfo() {
   };
   for (const GlobalVariable &GV : M.globals()) {
     UpdateMaxAlignment(GV.getAlign());
-    MaxGlobalType = std::max(MaxGlobalType, VE.getTypeID(GV.getValueType()));
+    Type *GVTy = GV.getValueType();
+    if (auto Ty = PointerMap.lookup(&GV))
+      GVTy = Ty->getElementType();
+    MaxGlobalType = std::max(MaxGlobalType, VE.getTypeID(GVTy));
     if (GV.hasSection()) {
       // Give section names unique ID's.
       unsigned &Entry = SectionMap[std::string(GV.getSection())];
@@ -1248,7 +1328,13 @@ void ModuleBitcodeWriter50::writeModuleInfo() {
     //             comdat, attributes]
     Vals.push_back(addToStrtab(GV.getName()));
     Vals.push_back(GV.getName().size());
-    Vals.push_back(VE.getTypeID(GV.getValueType()));
+    // Pointer-valued globals are emitted with the value type derived from
+    // their initializer (see typedGlobalValueType), so the initializer's
+    // typed pointer type matches.
+    Type *GVValTy = GV.getValueType();
+    if (auto Ty = PointerMap.lookup(&GV))
+      GVValTy = Ty->getElementType();
+    Vals.push_back(VE.getTypeID(GVValTy));
     Vals.push_back(GV.getType()->getAddressSpace() << 2 | 2 | GV.isConstant());
     Vals.push_back(GV.isDeclaration() ? 0 :
                    (VE.getValueID(GV.getInitializer()) + 1));
@@ -1322,7 +1408,10 @@ void ModuleBitcodeWriter50::writeModuleInfo() {
     //         visibility, dllstorageclass, threadlocal, unnamed_addr]
     Vals.push_back(addToStrtab(A.getName()));
     Vals.push_back(A.getName().size());
-    Vals.push_back(VE.getTypeID(A.getValueType()));
+    Type *AValTy = A.getValueType();
+    if (auto Ty = PointerMap.lookup(&A))
+      AValTy = Ty->getElementType();
+    Vals.push_back(VE.getTypeID(AValTy));
     Vals.push_back(A.getType()->getAddressSpace());
     Vals.push_back(VE.getValueID(A.getAliasee()));
     Vals.push_back(getEncodedLinkage(A));
@@ -1481,15 +1570,17 @@ void ModuleBitcodeWriter50::writeDISubrange(const DISubrange *N,
                                             SmallVectorImpl<uint64_t> &Record,
                                             unsigned Abbrev) {
   Record.push_back(N->isDistinct());
+  // A count expressed as a variable or expression (VLAs) has no 5.0
+  // representation; emit an empty range rather than crashing on the cast.
   ConstantInt *CI = nullptr;
   if (auto cnt = N->getCount(); cnt) {
-    CI = cast<ConstantInt *>(cnt);
+    CI = dyn_cast<ConstantInt *>(cnt);
   }
   const auto LBMD = dyn_cast_or_null<ConstantAsMetadata>(N->getRawLowerBound());
   if (CI && LBMD) {
     Record.push_back(CI->getSExtValue());
     const auto LB = cast<ConstantInt>(LBMD->getValue());
-    Record.push_back(rotateSign(LB->getZExtValue()));
+    Record.push_back(rotateSign(LB->getSExtValue()));
   } else {
     Record.push_back(int64_t(0));
     Record.push_back(uint64_t(0));
@@ -1506,25 +1597,18 @@ static void emitSignedInt64(SmallVectorImpl<uint64_t> &Vals, uint64_t V) {
     Vals.push_back((-V << 1) | 1);
 }
 
-static void emitWideAPInt(SmallVectorImpl<uint64_t> &Vals, const APInt &A) {
-  // We have an arbitrary precision integer value to write whose
-  // bit width is > 64. However, in canonical unsigned integer
-  // format it is likely that the high bits are going to be zero.
-  // So, we only write the number of active words.
-  unsigned NumWords = A.getActiveWords();
-  const uint64_t *RawData = A.getRawData();
-  for (unsigned i = 0; i < NumWords; i++)
-    emitSignedInt64(Vals, RawData[i]);
-}
-
 void ModuleBitcodeWriter50::writeDIEnumerator(const DIEnumerator *N,
                                             SmallVectorImpl<uint64_t> &Record,
                                             unsigned Abbrev) {
-  const uint64_t IsBigInt = 1 << 2;
-  Record.push_back(IsBigInt | (N->isUnsigned() << 1) | N->isDistinct());
-  Record.push_back(N->getValue().getBitWidth());
+  // The wide-APInt enumerator encoding only exists from LLVM 9; the 5.0 reader
+  // requires exactly [isDistinct, rotateSign(value), name]. Note that 5.0
+  // takes the whole first field as isDistinct, so no other flags may be set.
+  if (N->getValue().getSignificantBits() > 64)
+    report_fatal_error("DIEnumerator values wider than 64 bit are not "
+                       "supported with LLVM 5.0", false);
+  Record.push_back(N->isDistinct());
+  Record.push_back(rotateSign(N->getValue().getSExtValue()));
   Record.push_back(VE.getMetadataOrNullID(N->getRawName()));
-  emitWideAPInt(Record, N->getValue());
 
   Stream.EmitRecord(bitc::METADATA_ENUMERATOR, Record, Abbrev);
   Record.clear();
@@ -2290,9 +2374,14 @@ void ModuleBitcodeWriter50::writeConstants(unsigned FirstVal, unsigned LastVal,
   Type *LastTy = nullptr;
   for (unsigned i = FirstVal; i != LastVal; ++i) {
     const Value *V = Vals[i].first;
-    // If we need to switch types, do so now.
-    if (V->getType() != LastTy) {
-      LastTy = V->getType();
+    // If we need to switch types, do so now. Inline asm and blockaddress
+    // constants carry a typed pointer type (pointer-to-function / i8*) in the
+    // PointerMap; the legacy readers derive their type from this record.
+    Type *VTy = V->getType();
+    if (auto MappedTy = PointerMap.lookup(V))
+      VTy = MappedTy;
+    if (VTy != LastTy) {
+      LastTy = VTy;
       Record.push_back(VE.getTypeID(LastTy));
       Stream.EmitRecord(bitc::CST_CODE_SETTYPE, Record,
                         CONSTANTS_SETTYPE_ABBREV);
@@ -2300,6 +2389,9 @@ void ModuleBitcodeWriter50::writeConstants(unsigned FirstVal, unsigned LastVal,
     }
 
     if (const InlineAsm *IA = dyn_cast<InlineAsm>(V)) {
+      // the legacy record has no unwind bit; dropping it would be unsound
+      if (IA->canThrow())
+        report_fatal_error("unwinding inline asm is not supported with LLVM 5.0", false);
       Record.push_back(unsigned(IA->hasSideEffects()) |
                        unsigned(IA->isAlignStack()) << 1 |
                        unsigned(IA->getDialect()&1) << 2);
@@ -2483,7 +2575,14 @@ void ModuleBitcodeWriter50::writeConstants(unsigned FirstVal, unsigned LastVal,
       }
     } else if (const BlockAddress *BA = dyn_cast<BlockAddress>(C)) {
       Code = bitc::CST_CODE_BLOCKADDRESS;
-      Record.push_back(VE.getTypeID(BA->getFunction()->getType()));
+      // The record must name the function's emitted (typed) pointer type;
+      // the reader type-checks it against the already-resolved function.
+      {
+        Type *FnPtrTy = BA->getFunction()->getType();
+        if (auto MappedTy = PointerMap.lookup(BA->getFunction()))
+          FnPtrTy = MappedTy;
+        Record.push_back(VE.getTypeID(FnPtrTy));
+      }
       Record.push_back(VE.getValueID(BA->getFunction()));
       Record.push_back(VE.getGlobalBasicBlockID(BA->getBasicBlock()));
     } else {
@@ -2961,15 +3060,15 @@ void ModuleBitcodeWriter50::writeInstruction(const Instruction &I,
     Vals.push_back(VE.getTypeID(I.getType())); // restype.
     break;
   case Instruction::Freeze: {
-    llvm_unreachable("can not encode freeze instruction for LLVM 5.0");
+    report_fatal_error("cannot encode freeze instruction for LLVM 5.0", false);
     break;
   }
   case Instruction::FNeg: {
-    llvm_unreachable("can not encode fneg instruction for LLVM 5.0");
+    report_fatal_error("cannot encode fneg instruction for LLVM 5.0", false);
     break;
   }
   case Instruction::CallBr:
-    llvm_unreachable("can not encode CallBr instruction for LLVM 5.0");
+    report_fatal_error("cannot encode CallBr instruction for LLVM 5.0", false);
     break;
   }
 

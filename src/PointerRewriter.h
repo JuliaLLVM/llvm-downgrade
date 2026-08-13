@@ -35,6 +35,19 @@ public:
   static PointerTypeMap buildPointerMap(const Module &M);
   static bool requiresPointerRewriting(const Constant *C);
 
+  // Lower intrinsics to their legacy form: drop lifetime markers (whose
+  // signature changed incompatibly in LLVM 22), restore the typed-pointer
+  // name mangling (llvm.memcpy.p0i8.p0i8.i64, llvm.stacksave, ...), and, for
+  // a 5.0 target, re-insert the explicit align argument of the memory
+  // intrinsics. TargetMajor is the LLVM major of the target bitcode format.
+  static bool prepareIntrinsics(Module &M, unsigned TargetMajor);
+
+  // Abort on called intrinsics with pointer-typed parameters that have no
+  // typed legacy signature: their {}*-typed arguments would be rejected by
+  // the legacy verifiers ("Intrinsic has incorrect argument type!"). Used by
+  // the 5.0/7.0 targets.
+  static void checkIntrinsics(Module &M);
+
   // Return the typed pointer types in `PointerMap` in a deterministic module
   // order. Iterating the DenseMap directly orders types by `Value *` address,
   // which makes the emitted type table — and thus the whole bitcode — depend on

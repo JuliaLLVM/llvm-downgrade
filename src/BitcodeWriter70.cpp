@@ -555,7 +555,14 @@ static unsigned getEncodedBinaryOpcode(unsigned Opcode) {
 
 static unsigned getEncodedRMWOperation(AtomicRMWInst::BinOp Op) {
   switch (Op) {
-  default: llvm_unreachable("Unknown RMW operation!");
+  default:
+    // Operations introduced after this format (fadd/fsub in LLVM 9, fmax/fmin
+    // in 15, uinc/udec_wrap in 16, usub_cond/usub_sat in 20) have no encoding
+    // the legacy reader accepts; fail loudly instead of emitting garbage.
+    report_fatal_error(Twine("unsupported atomicrmw operation for the "
+                             "requested bitcode version: ") +
+                           AtomicRMWInst::getOperationName(Op),
+                       false);
   case AtomicRMWInst::Xchg: return bitc::RMW_XCHG;
   case AtomicRMWInst::Add: return bitc::RMW_ADD;
   case AtomicRMWInst::Sub: return bitc::RMW_SUB;
@@ -704,8 +711,6 @@ uint64_t getAttrKindEncoding70(Attribute::AttrKind Kind) {
     return bitc::ATTR_KIND_SWIFT_ERROR;
   case Attribute::SwiftSelf:
     return bitc::ATTR_KIND_SWIFT_SELF;
-  case Attribute::UWTable:
-    report_fatal_error("uwtable attribute is not supported in 7.0", false);
   case Attribute::WriteOnly:
     return bitc::ATTR_KIND_WRITEONLY;
   case Attribute::ZExt:
@@ -719,6 +724,122 @@ uint64_t getAttrKindEncoding70(Attribute::AttrKind Kind) {
   llvm_unreachable("Trying to encode unknown attribute");
 }
 
+// Append the LLVM 7.0 encoding of Attr to Record, returning how many attribute
+// entries were emitted. A null Record only counts. ValueEnumerator70 uses the
+// counting mode (via countEncodableAttrs70) to decide which attribute groups
+// exist at all, so the two must agree exactly: a group is dropped if and only
+// if the writer would emit an empty record for it.
+unsigned encodeAttribute70(const Attribute &Attr,
+                           SmallVectorImpl<uint64_t> *Record) {
+  auto Emit = [&](std::initializer_list<uint64_t> Vals) {
+    if (Record)
+      Record->append(Vals);
+  };
+
+  // The memory(...) attribute postdates 7.0; decompose the MemoryEffects into
+  // the legacy standalone enum attributes the 7.0 reader (and verifier) knows.
+  if (Attr.hasAttribute(Attribute::Memory)) {
+    unsigned N = 0;
+    MemoryEffects ME = Attr.getMemoryEffects();
+    auto EmitEnum = [&](uint64_t Code) {
+      Emit({0, Code});
+      ++N;
+    };
+    if (ME.doesNotAccessMemory())
+      EmitEnum(bitc::ATTR_KIND_READ_NONE);
+    else {
+      if (ME.onlyReadsMemory())
+        EmitEnum(bitc::ATTR_KIND_READ_ONLY);
+      else if (ME.onlyWritesMemory())
+        EmitEnum(bitc::ATTR_KIND_WRITEONLY);
+      if (ME.onlyAccessesArgPointees())
+        EmitEnum(bitc::ATTR_KIND_ARGMEMONLY);
+      else if (ME.onlyAccessesInaccessibleMem())
+        EmitEnum(bitc::ATTR_KIND_INACCESSIBLEMEM_ONLY);
+      else if (ME.onlyAccessesInaccessibleOrArgMem())
+        EmitEnum(bitc::ATTR_KIND_INACCESSIBLEMEM_OR_ARGMEMONLY);
+    }
+    return N;
+  }
+
+  // LLVM 21 replaced nocapture with the richer captures(...) attribute. LLVM
+  // 7.0 only has nocapture, equivalent to captures(none); drop any weaker
+  // capture information.
+  if (Attr.hasAttribute(Attribute::Captures)) {
+    if (!capturesNothing(Attr.getCaptureInfo()))
+      return 0;
+    Emit({0, bitc::ATTR_KIND_NO_CAPTURE});
+    return 1;
+  }
+
+  // uwtable became an int attribute (sync/async) in LLVM 15. Both kinds ask
+  // codegen for unwind tables, which is also what the legacy plain uwtable
+  // does, so emit that rather than dropping the attribute.
+  if (Attr.hasAttribute(Attribute::UWTable)) {
+    Emit({0, bitc::ATTR_KIND_UW_TABLE});
+    return 1;
+  }
+
+  if (Attr.isEnumAttribute() || Attr.isIntAttribute()) {
+    // only encode attributes that are supported by LLVM 7.0
+    const uint64_t Enc = getAttrKindEncoding70(Attr.getKindAsEnum());
+    if (Enc == bitc::ATTR_KIND_INVALID)
+      return 0;
+    if (Attr.isEnumAttribute())
+      Emit({0, Enc});
+    else
+      Emit({1, Enc, Attr.getValueAsInt()});
+    return 1;
+  }
+
+  if (Attr.isStringAttribute()) {
+    if (Record) {
+      StringRef Kind = Attr.getKindAsString();
+      StringRef Val = Attr.getValueAsString();
+
+      Record->push_back(Val.empty() ? 3 : 4);
+      Record->append(Kind.begin(), Kind.end());
+      Record->push_back(0);
+      if (!Val.empty()) {
+        Record->append(Val.begin(), Val.end());
+        Record->push_back(0);
+      }
+    }
+    return 1;
+  }
+
+  if (Attr.isTypeAttribute()) {
+    // Type attributes postdate 7.0, but byval/sret/inalloca exist there as
+    // plain enum attributes: the payload type is implied by the pointer
+    // element type of the parameter, which the PointerRewriter reconstructs
+    // from these same attributes.
+    switch (Attr.getKindAsEnum()) {
+    case Attribute::ByVal:
+      Emit({0, bitc::ATTR_KIND_BY_VAL});
+      return 1;
+    case Attribute::StructRet:
+      Emit({0, bitc::ATTR_KIND_STRUCT_RET});
+      return 1;
+    case Attribute::InAlloca:
+      Emit({0, bitc::ATTR_KIND_IN_ALLOCA});
+      return 1;
+    default: // byref/preallocated/elementtype have no 7.0 equivalent.
+      return 0;
+    }
+  }
+
+  // Remaining kinds (the ConstantRange(-list) attributes range/initializes)
+  // are pure optimization hints with no legacy encoding.
+  return 0;
+}
+
+unsigned countEncodableAttrs70(const AttributeSet &AS) {
+  unsigned N = 0;
+  for (Attribute Attr : AS)
+    N += encodeAttribute70(Attr, nullptr);
+  return N;
+}
+
 void ModuleBitcodeWriter70::writeAttributeGroupTable() {
   const std::vector<ValueEnumerator70::IndexAndAttrSet> &AttrGrps =
       VE.getAttributeGroups();
@@ -728,57 +849,17 @@ void ModuleBitcodeWriter70::writeAttributeGroupTable() {
 
   SmallVector<uint64_t, 64> Record;
   for (ValueEnumerator70::IndexAndAttrSet Pair : AttrGrps) {
+    if (Pair.first == ValueEnumerator70::invalid_attribute_group_id) {
+      // this complete set/group can't be encoded for 7.0
+      continue;
+    }
     unsigned AttrListIndex = Pair.first;
     AttributeSet AS = Pair.second;
     Record.push_back(VE.getAttributeGroupID(Pair));
     Record.push_back(AttrListIndex);
 
-    for (Attribute Attr : AS) {
-      if (Attr.isEnumAttribute() || Attr.isIntAttribute()) {
-        // LLVM 21 replaced nocapture with the richer captures(...) attribute.
-        // LLVM 7.0 only has nocapture, equivalent to captures(none); drop any
-        // weaker capture information.
-        if (Attr.getKindAsEnum() == Attribute::Captures) {
-          if (Attr.getValueAsInt() == CaptureInfo::none().toIntValue()) {
-            Record.push_back(0);
-            Record.push_back(bitc::ATTR_KIND_NO_CAPTURE);
-          }
-          continue;
-        }
-        // only encode attributes that are supported by LLVM 7.0
-        const auto enc_attr = getAttrKindEncoding70(Attr.getKindAsEnum());
-        if (enc_attr != llvm::bitc::ATTR_KIND_INVALID) {
-          if (Attr.isEnumAttribute()) {
-            Record.push_back(0);
-            Record.push_back(enc_attr);
-          } else {
-            Record.push_back(1);
-            Record.push_back(enc_attr);
-            Record.push_back(Attr.getValueAsInt());
-          }
-        }
-      } else if (Attr.isStringAttribute()) {
-        StringRef Kind = Attr.getKindAsString();
-        StringRef Val = Attr.getValueAsString();
-
-        Record.push_back(Val.empty() ? 3 : 4);
-        Record.append(Kind.begin(), Kind.end());
-        Record.push_back(0);
-        if (!Val.empty()) {
-          Record.append(Val.begin(), Val.end());
-          Record.push_back(0);
-        }
-      } else {
-        assert(Attr.isTypeAttribute());
-        // type attributes are not supported by LLVM 7.0, but we do want to encode byval
-        if (Attr.getKindAsEnum() == Attribute::ByVal) {
-          const auto enc_attr = getAttrKindEncoding70(Attr.getKindAsEnum());
-          Record.push_back(0);
-          Record.push_back(enc_attr);
-          // the byval type is not supported by LLVM 7.0
-        }
-      }
-    }
+    for (Attribute Attr : AS)
+      encodeAttribute70(Attr, &Record);
 
     Stream.EmitRecord(bitc::PARAMATTR_GRP_CODE_ENTRY, Record);
     Record.clear();
@@ -798,7 +879,9 @@ void ModuleBitcodeWriter70::writeAttributeTable() {
     for (unsigned i : AL.indexes()) {
       AttributeSet AS = AL.getAttributes(i);
       if (AS.hasAttributes())
-        Record.push_back(VE.getAttributeGroupID({i, AS}));
+        if (const auto group_id = VE.getAttributeGroupID({i, AS});
+            group_id != ValueEnumerator70::invalid_attribute_group_id)
+          Record.push_back(group_id);
     }
 
     Stream.EmitRecord(bitc::PARAMATTR_CODE_ENTRY, Record);
@@ -1178,7 +1261,10 @@ void ModuleBitcodeWriter70::writeModuleInfo() {
   };
   for (const GlobalVariable &GV : M.globals()) {
     UpdateMaxAlignment(GV.getAlign());
-    MaxGlobalType = std::max(MaxGlobalType, VE.getTypeID(GV.getValueType()));
+    Type *GVTy = GV.getValueType();
+    if (auto Ty = PointerMap.lookup(&GV))
+      GVTy = Ty->getElementType();
+    MaxGlobalType = std::max(MaxGlobalType, VE.getTypeID(GVTy));
     if (GV.hasSection()) {
       // Give section names unique ID's.
       unsigned &Entry = SectionMap[std::string(GV.getSection())];
@@ -1276,7 +1362,13 @@ void ModuleBitcodeWriter70::writeModuleInfo() {
     //             comdat, attributes, DSO_Local]
     Vals.push_back(addToStrtab(GV.getName()));
     Vals.push_back(GV.getName().size());
-    Vals.push_back(VE.getTypeID(GV.getValueType()));
+    // Pointer-valued globals are emitted with the value type derived from
+    // their initializer (see typedGlobalValueType), so the initializer's
+    // typed pointer type matches.
+    Type *GVValTy = GV.getValueType();
+    if (auto Ty = PointerMap.lookup(&GV))
+      GVValTy = Ty->getElementType();
+    Vals.push_back(VE.getTypeID(GVValTy));
     Vals.push_back(GV.getType()->getAddressSpace() << 2 | 2 | GV.isConstant());
     Vals.push_back(GV.isDeclaration() ? 0 :
                    (VE.getValueID(GV.getInitializer()) + 1));
@@ -1355,7 +1447,10 @@ void ModuleBitcodeWriter70::writeModuleInfo() {
     //         DSO_Local]
     Vals.push_back(addToStrtab(A.getName()));
     Vals.push_back(A.getName().size());
-    Vals.push_back(VE.getTypeID(A.getValueType()));
+    Type *AValTy = A.getValueType();
+    if (auto Ty = PointerMap.lookup(&A))
+      AValTy = Ty->getElementType();
+    Vals.push_back(VE.getTypeID(AValTy));
     Vals.push_back(A.getType()->getAddressSpace());
     Vals.push_back(VE.getValueID(A.getAliasee()));
     Vals.push_back(getEncodedLinkage(A));
@@ -1524,7 +1619,7 @@ void ModuleBitcodeWriter70::writeDISubrange(const DISubrange *N,
   const auto LBMD = dyn_cast_or_null<ConstantAsMetadata>(N->getRawLowerBound());
   if (LBMD) {
     const auto LB = cast<ConstantInt>(LBMD->getValue());
-    Record.push_back(rotateSign(LB->getZExtValue()));
+    Record.push_back(rotateSign(LB->getSExtValue()));
   } else {
     Record.push_back(uint64_t(0));
   }
@@ -1540,25 +1635,17 @@ static void emitSignedInt64(SmallVectorImpl<uint64_t> &Vals, uint64_t V) {
     Vals.push_back((-V << 1) | 1);
 }
 
-static void emitWideAPInt(SmallVectorImpl<uint64_t> &Vals, const APInt &A) {
-  // We have an arbitrary precision integer value to write whose
-  // bit width is > 64. However, in canonical unsigned integer
-  // format it is likely that the high bits are going to be zero.
-  // So, we only write the number of active words.
-  unsigned NumWords = A.getActiveWords();
-  const uint64_t *RawData = A.getRawData();
-  for (unsigned i = 0; i < NumWords; i++)
-    emitSignedInt64(Vals, RawData[i]);
-}
-
 void ModuleBitcodeWriter70::writeDIEnumerator(const DIEnumerator *N,
                                             SmallVectorImpl<uint64_t> &Record,
                                             unsigned Abbrev) {
-  const uint64_t IsBigInt = 1 << 2;
-  Record.push_back(IsBigInt | (N->isUnsigned() << 1) | N->isDistinct());
-  Record.push_back(N->getValue().getBitWidth());
+  // The wide-APInt enumerator encoding only exists from LLVM 9; the 7.0 reader
+  // requires exactly [isDistinct | isUnsigned << 1, rotateSign(value), name].
+  if (N->getValue().getSignificantBits() > 64)
+    report_fatal_error("DIEnumerator values wider than 64 bit are not "
+                       "supported with LLVM 7.0", false);
+  Record.push_back((N->isUnsigned() << 1) | N->isDistinct());
+  Record.push_back(rotateSign(N->getValue().getSExtValue()));
   Record.push_back(VE.getMetadataOrNullID(N->getRawName()));
-  emitWideAPInt(Record, N->getValue());
 
   Stream.EmitRecord(bitc::METADATA_ENUMERATOR, Record, Abbrev);
   Record.clear();
@@ -2338,9 +2425,14 @@ void ModuleBitcodeWriter70::writeConstants(unsigned FirstVal, unsigned LastVal,
   Type *LastTy = nullptr;
   for (unsigned i = FirstVal; i != LastVal; ++i) {
     const Value *V = Vals[i].first;
-    // If we need to switch types, do so now.
-    if (V->getType() != LastTy) {
-      LastTy = V->getType();
+    // If we need to switch types, do so now. Inline asm and blockaddress
+    // constants carry a typed pointer type (pointer-to-function / i8*) in the
+    // PointerMap; the legacy readers derive their type from this record.
+    Type *VTy = V->getType();
+    if (auto MappedTy = PointerMap.lookup(V))
+      VTy = MappedTy;
+    if (VTy != LastTy) {
+      LastTy = VTy;
       Record.push_back(VE.getTypeID(LastTy));
       Stream.EmitRecord(bitc::CST_CODE_SETTYPE, Record,
                         CONSTANTS_SETTYPE_ABBREV);
@@ -2348,6 +2440,9 @@ void ModuleBitcodeWriter70::writeConstants(unsigned FirstVal, unsigned LastVal,
     }
 
     if (const InlineAsm *IA = dyn_cast<InlineAsm>(V)) {
+      // the legacy record has no unwind bit; dropping it would be unsound
+      if (IA->canThrow())
+        report_fatal_error("unwinding inline asm is not supported with LLVM 7.0", false);
       Record.push_back(unsigned(IA->hasSideEffects()) |
                        unsigned(IA->isAlignStack()) << 1 |
                        unsigned(IA->getDialect()&1) << 2);
@@ -2361,7 +2456,9 @@ void ModuleBitcodeWriter70::writeConstants(unsigned FirstVal, unsigned LastVal,
       StringRef ConstraintStr = IA->getConstraintString();
       Record.push_back(ConstraintStr.size());
       Record.append(ConstraintStr.begin(), ConstraintStr.end());
-      Stream.EmitRecord(bitc::CST_CODE_INLINEASM, Record);
+      // LLVM 7's CST_CODE_INLINEASM has value 23, which the modern headers call
+      // CST_CODE_INLINEASM_OLD2; the current code 30 is rejected by its reader.
+      Stream.EmitRecord(bitc::CST_CODE_INLINEASM_OLD2, Record);
       Record.clear();
       continue;
     }
@@ -2531,7 +2628,14 @@ void ModuleBitcodeWriter70::writeConstants(unsigned FirstVal, unsigned LastVal,
       }
     } else if (const BlockAddress *BA = dyn_cast<BlockAddress>(C)) {
       Code = bitc::CST_CODE_BLOCKADDRESS;
-      Record.push_back(VE.getTypeID(BA->getFunction()->getType()));
+      // The record must name the function's emitted (typed) pointer type;
+      // the reader type-checks it against the already-resolved function.
+      {
+        Type *FnPtrTy = BA->getFunction()->getType();
+        if (auto MappedTy = PointerMap.lookup(BA->getFunction()))
+          FnPtrTy = MappedTy;
+        Record.push_back(VE.getTypeID(FnPtrTy));
+      }
       Record.push_back(VE.getValueID(BA->getFunction()));
       Record.push_back(VE.getGlobalBasicBlockID(BA->getBasicBlock()));
     } else {
@@ -2698,7 +2802,10 @@ void ModuleBitcodeWriter70::writeInstruction(const Instruction &I,
     Code = bitc::FUNC_CODE_INST_SHUFFLEVEC;
     pushValueAndType(I.getOperand(0), InstID, Vals);
     pushValue(I.getOperand(1), InstID, Vals);
-    pushValue(I.getOperand(2), InstID, Vals);
+    // The mask stopped being an operand in LLVM 11; getOperand(2) is out of
+    // bounds on a modern ShuffleVectorInst.
+    pushValue(cast<ShuffleVectorInst>(I).getShuffleMaskForBitcode(), InstID,
+              Vals);
     break;
   case Instruction::ICmp:
   case Instruction::FCmp: {
@@ -3012,15 +3119,15 @@ void ModuleBitcodeWriter70::writeInstruction(const Instruction &I,
     Vals.push_back(VE.getTypeID(I.getType())); // restype.
     break;
   case Instruction::Freeze: {
-    llvm_unreachable("can not encode freeze instruction for LLVM 7.0");
+    report_fatal_error("cannot encode freeze instruction for LLVM 7.0", false);
     break;
   }
   case Instruction::FNeg: {
-    llvm_unreachable("can not encode fneg instruction for LLVM 5.0");
+    report_fatal_error("cannot encode fneg instruction for LLVM 7.0", false);
     break;
   }
   case Instruction::CallBr:
-    llvm_unreachable("can not encode CallBr instruction for LLVM 7.0");
+    report_fatal_error("cannot encode CallBr instruction for LLVM 7.0", false);
     break;
   }
 

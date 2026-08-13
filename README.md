@@ -62,8 +62,40 @@ cmake -B build -S . -DLLVM_DIR=... \
   -DLLVMDG_DIS_14_0=/path/to/llvm-14/bin/llvm-dis
 ```
 
+`llvm-dis` does not run the IR verifier, so it misses semantically invalid
+output (attribute type mismatches, bad intrinsic signatures, ...). Point the
+build at the matching legacy `opt` binaries as well and every downgraded module
+is additionally run through the real old verifier:
+
+```sh
+  -DLLVMDG_OPT_5_0=/path/to/llvm-5/bin/opt   # etc.
+```
+
+The official release tarballs from releases.llvm.org provide suitable
+`llvm-dis`/`opt` binaries for all three versions.
+
 `test/run-downgrade-test.sh` documents the per-test directives (`VERSIONS`,
 `MIN-LLVM`/`MAX-LLVM`, `XFAIL-AS`, `XFAIL-DIS-V*`) and the FileCheck prefixes.
+
+## Limitations
+
+Constructs with no reasonable legacy representation are rejected with a fatal
+error rather than silently miscompiled: exception handling (`invoke`, 5.0/7.0
+targets), `callbr`, atomicrmw operations newer than the target format,
+vector-of-pointer GEPs, unwinding inline asm (5.0/7.0), scalable vectors /
+bfloat / AMX (5.0/7.0), target extension types, pointer-typed intrinsics
+without a known typed signature (5.0/7.0), `DIEnumerator` values wider than 64
+bits (5.0/7.0), and `DIAssignID`/`DIFixedPointType`/`DISubrangeType` (14.0).
+
+Some information is dropped, always soundly: attribute kinds that postdate the
+target (`nofpclass`, `range`, partial `captures`, ...), poison-generating
+instruction flags (`disjoint`, `nneg`, `samesign`, `nuw`/`nusw` on GEP and
+`trunc`), `llvm.lifetime` markers (their modern form has no legacy signature),
+and `#dbg_value`/`#dbg_declare` variable-location records (the legacy writers
+predate debug records, and modern LLVM has no intrinsic form left to lower them
+to). Line-table debug info survives. The datalayout and triple strings are
+passed through unmodified; a datalayout with specifiers the target LLVM cannot
+parse is the front-end's responsibility.
 
 ## Licensing
 

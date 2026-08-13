@@ -19,30 +19,6 @@
 #include "llvm/IR/Module.h"
 using namespace llvm;
 
-// LLVM 19 made va_start/va_end/va_copy take an explicit pointer type, mangling
-// their names with a pointer suffix (e.g. llvm.va_start.p0). LLVM 5/7 only know
-// these intrinsics under their unmangled names, so rename the declarations (and
-// thereby all calls) back to the legacy form.
-static bool renameVarargIntrinsics(Module &M) {
-  bool Changed = false;
-  for (Function &F : M) {
-    if (!F.isIntrinsic())
-      continue;
-    StringRef Name;
-    switch (F.getIntrinsicID()) {
-    case Intrinsic::vastart: Name = "llvm.va_start"; break;
-    case Intrinsic::vaend:   Name = "llvm.va_end";   break;
-    case Intrinsic::vacopy:  Name = "llvm.va_copy";  break;
-    default: continue;
-    }
-    if (F.getName() != Name) {
-      F.setName(Name);
-      Changed = true;
-    }
-  }
-  return Changed;
-}
-
 static bool removeFreeze(Module &M) {
     // Find freeze instructions
     SmallVector<FreezeInst *, 8> Worklist;
@@ -74,10 +50,12 @@ static bool replaceFNeg(Module &M) {
   if (Worklist.empty())
     return false;
 
-  // Replace fneg instructions by fsub instructions
+  // Replace fneg instructions by fsub instructions, keeping the fast-math
+  // flags (the builder does not copy them from the replaced instruction)
   IRBuilder<> Builder(M.getContext());
   for (UnaryOperator *Op : Worklist) {
     Builder.SetInsertPoint(Op);
+    Builder.setFastMathFlags(Op->getFastMathFlags());
     Value *In = Op->getOperand(0);
     Value *Zero = ConstantFP::get(In->getType(), -0.0);
     Op->replaceAllUsesWith(Builder.CreateFSub(Zero, In));
@@ -89,7 +67,11 @@ static bool replaceFNeg(Module &M) {
 bool BitcodeWriter70::prepareModule(Module &M) {
   bool Changed = removeFreeze(M);
   Changed |= replaceFNeg(M);
-  Changed |= renameVarargIntrinsics(M);
+
+  // Lower intrinsics to their legacy names/signatures, and reject any
+  // pointer-typed intrinsic we cannot reconstruct a typed signature for.
+  Changed |= PointerRewriter::prepareIntrinsics(M, 7);
+  PointerRewriter::checkIntrinsics(M);
 
   PointerRewriter PR(M);
   Changed |= PR.run();

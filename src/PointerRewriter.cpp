@@ -41,8 +41,15 @@
 // cannot be inferred from the IR.
 
 #include "PointerRewriter.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/Twine.h"
+#include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/GlobalAlias.h"
+#include "llvm/IR/GlobalIFunc.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
@@ -109,7 +116,8 @@ static bool demotePointerConstants(Module &M) {
   return convertUsersOfConstantsToInstructions(Worklist, nullptr, true, true);
 }
 
-// determine the typed function type based on !arg_eltypes metadata
+// determine the typed function type based on known intrinsic signatures,
+// !arg_eltypes metadata, and pointee-type parameter attributes
 static FunctionType *getTypedFunctionType(const Function *F) {
   auto &Ctx = F->getContext();
   auto *FTy = F->getFunctionType();
@@ -252,26 +260,65 @@ static FunctionType *getTypedFunctionType(const Function *F) {
           TypedPointerType::get(Type::getInt8Ty(Ctx),
                                 FTy->getReturnType()->getPointerAddressSpace()),
           {}, false);
+    case Intrinsic::memcpy:
+    case Intrinsic::memmove:
+    case Intrinsic::memset: {
+      // void @llvm.memcpy(i8* dst, i8* src, iN len[, i32 align], i1 volatile)
+      // void @llvm.memset(i8* dst, i8 val, iN len[, i32 align], i1 volatile)
+      // (the explicit align argument only exists in the 5.0 form; see
+      // addMemIntrinsicAlignArg)
+      SmallVector<Type *, 5> Params(FTy->params().begin(), FTy->params().end());
+      unsigned NumPtrArgs = F->getIntrinsicID() == Intrinsic::memset ? 1 : 2;
+      for (unsigned i = 0; i < NumPtrArgs; i++)
+        Params[i] = TypedPointerType::get(
+            Type::getInt8Ty(Ctx), Params[i]->getPointerAddressSpace());
+      return FunctionType::get(Type::getVoidTy(Ctx), Params, false);
+    }
     }
   }
 
-  // look at the !arg_eltypes metadata
-  MDNode *MD = F->getMetadata("arg_eltypes");
-  if (!MD)
-    return FTy;
-
   auto Args = FTy->params().vec();
-  for (unsigned i = 0; i < MD->getNumOperands(); i += 2) {
-    auto IdxConstant = cast<ConstantAsMetadata>(MD->getOperand(i))->getValue();
-    int Idx = cast<ConstantInt>(IdxConstant)->getZExtValue();
-    Type *ElTy =
-        cast<ValueAsMetadata>(MD->getOperand(i + 1))->getValue()->getType();
+  bool Changed = false;
 
-    auto OpaquePtrTy = cast<PointerType>(Args[Idx]);
-    auto TypedPtrTy =
-        TypedPointerType::get(ElTy, OpaquePtrTy->getAddressSpace());
-    Args[Idx] = TypedPtrTy;
+  // look at the !arg_eltypes metadata
+  if (MDNode *MD = F->getMetadata("arg_eltypes")) {
+    for (unsigned i = 0; i < MD->getNumOperands(); i += 2) {
+      auto IdxConstant = cast<ConstantAsMetadata>(MD->getOperand(i))->getValue();
+      int Idx = cast<ConstantInt>(IdxConstant)->getZExtValue();
+      Type *ElTy =
+          cast<ValueAsMetadata>(MD->getOperand(i + 1))->getValue()->getType();
+
+      auto OpaquePtrTy = cast<PointerType>(Args[Idx]);
+      auto TypedPtrTy =
+          TypedPointerType::get(ElTy, OpaquePtrTy->getAddressSpace());
+      Args[Idx] = TypedPtrTy;
+      Changed = true;
+    }
   }
+
+  // Parameters carrying a pointee-type attribute must be emitted with that
+  // pointee: legacy byval/sret/inalloca take their type from the parameter's
+  // pointer element type, and the LLVM 14 verifier requires the typed
+  // attribute payload to match it.
+  AttributeList AL = F->getAttributes();
+  for (unsigned i = 0; i < FTy->getNumParams(); i++) {
+    if (!isa<PointerType>(Args[i]))
+      continue;
+    AttributeSet PA = AL.getParamAttrs(i);
+    Type *ElTy = PA.getByValType();
+    if (!ElTy)
+      ElTy = PA.getStructRetType();
+    if (!ElTy)
+      ElTy = PA.getInAllocaType();
+    if (!ElTy)
+      continue;
+    Args[i] = TypedPointerType::get(
+        ElTy, cast<PointerType>(Args[i])->getAddressSpace());
+    Changed = true;
+  }
+
+  if (!Changed)
+    return FTy;
   return FunctionType::get(FTy->getReturnType(), Args, FTy->isVarArg());
 }
 
@@ -301,7 +348,8 @@ static void prependBitcast(Module &M, Instruction *I, int Idx) {
   I->setOperand(Idx, Cast);
 }
 
-// replace all uses of a value with no-op bitcasts
+// replace all instruction uses of a value with no-op bitcasts, except for
+// uses as the callee of a direct call (which must stay a direct call)
 static void replaceWithBitcast(Module &M, Value *V) {
   assert(V->getType()->isPtrOrPtrVectorTy() && "Expected a pointer value");
 
@@ -309,6 +357,9 @@ static void replaceWithBitcast(Module &M, Value *V) {
   SmallVector<std::pair<Instruction *, unsigned>, 8> Worklist;
   for (Use &Use : V->uses()) {
     auto User = Use.getUser();
+    if (auto *CB = dyn_cast<CallBase>(User))
+      if (CB->isCallee(&Use))
+        continue;
     if (auto *I = dyn_cast<Instruction>(User))
       Worklist.push_back({I, Use.getOperandNo()});
   }
@@ -335,22 +386,50 @@ static void appendBitcast(Module &M, Instruction *I) {
   Cast->setOperand(0, I);
 }
 
-// bitcast uses of globals, for which we can infer the element type based on the
-// global's type
-bool bitcastGlobals(Module &M) {
-  // Find all globals
-  SmallVector<GlobalVariable *, 8> Worklist;
+// bitcast uses of global values (globals, functions, aliases, ifuncs), which
+// are emitted with their own typed pointer type rather than the opaque one.
+// Direct-callee uses are left alone: the call machinery retypes those itself.
+bool bitcastGlobalValues(Module &M) {
+  SmallVector<GlobalValue *, 8> Worklist;
   for (GlobalVariable &GV : M.globals())
     Worklist.push_back(&GV);
+  for (Function &F : M)
+    Worklist.push_back(&F);
+  for (GlobalAlias &GA : M.aliases())
+    Worklist.push_back(&GA);
+  for (GlobalIFunc &GIF : M.ifuncs())
+    Worklist.push_back(&GIF);
   if (Worklist.empty())
     return false;
 
   // Insert bitcasts
-  for (GlobalVariable *GV : Worklist) {
+  for (GlobalValue *GV : Worklist) {
     replaceWithBitcast(M, GV);
   }
 
   return true;
+}
+
+// Wrap uses of arguments whose parameter is emitted with a typed pointer
+// (byval/sret/inalloca or !arg_eltypes), bridging the reader-side typed
+// argument back to the opaque pointer the rest of the body expects.
+static bool bitcastTypedArguments(Module &M) {
+  bool Changed = false;
+  for (Function &F : M) {
+    if (F.isDeclaration())
+      continue;
+    auto *FTy = F.getFunctionType();
+    auto *NewFTy = getTypedFunctionType(&F);
+    if (FTy == NewFTy)
+      continue;
+    for (unsigned i = 0; i < FTy->getNumParams(); i++) {
+      if (NewFTy->getParamType(i) == FTy->getParamType(i))
+        continue;
+      replaceWithBitcast(M, F.getArg(i));
+      Changed = true;
+    }
+  }
+  return Changed;
 }
 
 // bitcast operands to instructions, by infering the element type by inspecting
@@ -369,16 +448,27 @@ bool bitcastInstructionOperands(Module &M) {
           Worklist.push_back(AI);
         else if (auto *AI = dyn_cast<AtomicCmpXchgInst>(&I))
           Worklist.push_back(AI);
-        else if (auto *GEP = dyn_cast<GetElementPtrInst>(&I))
+        else if (auto *GEP = dyn_cast<GetElementPtrInst>(&I)) {
+          // A vector-of-pointer GEP would need a vector of typed pointers,
+          // which TypedPointerType cannot express; the emitted cast would be
+          // invalid ("Invalid cast") for the legacy reader.
+          if (GEP->getType()->isVectorTy() ||
+              GEP->getPointerOperand()->getType()->isVectorTy())
+            report_fatal_error("vector-of-pointer getelementptr is not "
+                               "supported by the IR downgrader", false);
           Worklist.push_back(GEP);
-        else if (auto *AI = dyn_cast<AllocaInst>(&I))
+        } else if (auto *AI = dyn_cast<AllocaInst>(&I))
           Worklist.push_back(AI);
         else if (auto *CI = dyn_cast<CallInst>(&I)) {
           // An indirect (or otherwise non-Function) callee is enumerated with
           // the opaque pointer type, which won't match the call's function
           // type. Retype it with a bitcast, like old typed-pointer IR's
-          // `call ... bitcast(callee to FTy*)()` form.
-          if (!CI->getCalledFunction())
+          // `call ... bitcast(callee to FTy*)()` form. Inline asm is excluded:
+          // its constant record already carries the function type, and a cast
+          // of it would be rejected ("Cannot take the address of an inline
+          // asm"); buildPointerMap types the asm value directly instead.
+          if (!CI->getCalledFunction() &&
+              !isa<InlineAsm>(CI->getCalledOperand()))
             Worklist.push_back(CI);
         }
       }
@@ -438,22 +528,83 @@ bool bitcastFunctionOperands(Module &M) {
   return false;
 }
 
+// The value type a global value is emitted with (the pointee of its typed
+// pointer type). For pointer-valued globals and aliases the opaque value type
+// carries no information, so it is derived from the initializer/aliasee: the
+// reader-side type of `@p = global ptr @g` is `i32** @p = global i32* @g`.
+static Type *typedGlobalValueType(const GlobalValue *GV,
+                                  SmallPtrSetImpl<const GlobalValue *> &Seen) {
+  if (const auto *F = dyn_cast<Function>(GV))
+    return getTypedFunctionType(F);
+
+  Type *ValueTy = GV->getValueType();
+  if (!ValueTy->isPointerTy())
+    return ValueTy;
+  if (!Seen.insert(GV).second)
+    report_fatal_error("cyclic pointer-typed global initializers are not "
+                       "supported by the IR downgrader", false);
+
+  const Constant *Pointee = nullptr;
+  if (const auto *GVar = dyn_cast<GlobalVariable>(GV)) {
+    if (GVar->hasInitializer())
+      Pointee = GVar->getInitializer();
+  } else if (const auto *GA = dyn_cast<GlobalAlias>(GV)) {
+    Pointee = GA->getAliasee();
+  }
+
+  // Without a pointee naming an element type, keep the opaque form; a null or
+  // undef initializer is emitted with that same opaque type, so they match.
+  if (!Pointee || isa<ConstantPointerNull>(Pointee) || isa<UndefValue>(Pointee))
+    return ValueTy;
+  if (const auto *PGV = dyn_cast<GlobalValue>(Pointee))
+    return TypedPointerType::get(typedGlobalValueType(PGV, Seen),
+                                 PGV->getAddressSpace());
+  if (const auto *BA = dyn_cast<BlockAddress>(Pointee))
+    return TypedPointerType::get(Type::getInt8Ty(GV->getContext()),
+                                 BA->getType()->getPointerAddressSpace());
+  // Constant-expression initializers containing pointers are rejected by the
+  // writers' constant emission; keep the opaque form here.
+  return ValueTy;
+}
+
+// blockaddress constants are emitted with the legacy i8* type
+static TypedPointerType *blockAddressType(const BlockAddress *BA) {
+  return TypedPointerType::get(Type::getInt8Ty(BA->getContext()),
+                               BA->getType()->getPointerAddressSpace());
+}
+
 // build a map of values to typed pointer types
 PointerTypeMap PointerRewriter::buildPointerMap(const Module &M) {
   PointerTypeMap PointerMap;
 
   // globals
   for (const GlobalVariable &GV : M.globals()) {
-    Type *ElTy = GV.getValueType();
+    SmallPtrSet<const GlobalValue *, 4> Seen;
     unsigned AS = GV.getAddressSpace();
-    auto TypedPtrTy = TypedPointerType::get(ElTy, AS);
-    PointerMap[&GV] = TypedPtrTy;
+    PointerMap[&GV] =
+        TypedPointerType::get(typedGlobalValueType(&GV, Seen), AS);
+    if (GV.hasInitializer())
+      if (const auto *BA = dyn_cast<BlockAddress>(GV.getInitializer()))
+        PointerMap[BA] = blockAddressType(BA);
   }
+
+  // aliases and ifuncs
+  for (const GlobalAlias &GA : M.aliases()) {
+    SmallPtrSet<const GlobalValue *, 4> Seen;
+    PointerMap[&GA] = TypedPointerType::get(typedGlobalValueType(&GA, Seen),
+                                            GA.getAddressSpace());
+  }
+  for (const GlobalIFunc &GIF : M.ifuncs())
+    PointerMap[&GIF] =
+        TypedPointerType::get(GIF.getValueType(), GIF.getAddressSpace());
 
   // instructions
   for (const Function &F : M) {
     for (const BasicBlock &BB : F) {
       for (const Instruction &I : BB) {
+        for (const Use &Op : I.operands())
+          if (const auto *BA = dyn_cast<BlockAddress>(Op))
+            PointerMap[BA] = blockAddressType(BA);
         if (auto *LI = dyn_cast<LoadInst>(&I)) {
           assert(isNoopCast(LI->getPointerOperand()));
           PointerMap[LI->getPointerOperand()] = TypedPointerType::get(
@@ -483,8 +634,11 @@ PointerTypeMap PointerRewriter::buildPointerMap(const Module &M) {
                                                  AI->getAddressSpace());
         } else if (auto *CI = dyn_cast<CallInst>(&I)) {
           if (!CI->getCalledFunction()) {
+            // Inline asm callees have no cast (see bitcastInstructionOperands);
+            // typing the asm value itself makes its constant record carry the
+            // right pointer-to-function type.
             const Value *Callee = CI->getCalledOperand();
-            assert(isNoopCast(Callee));
+            assert(isa<InlineAsm>(Callee) || isNoopCast(Callee));
             PointerMap[Callee] = TypedPointerType::get(
                 CI->getFunctionType(),
                 Callee->getType()->getPointerAddressSpace());
@@ -508,8 +662,16 @@ PointerTypeMap PointerRewriter::buildPointerMap(const Module &M) {
       if (OldTy == NewTy)
         continue;
 
+      // arguments of definitions are bridged with casts too
+      if (!F.isDeclaration())
+        PointerMap[F.getArg(i)] = cast<TypedPointerType>(NewTy);
+
       for (const User *U : F.users()) {
         if (auto *CI = dyn_cast<CallInst>(U)) {
+          // only calls *to* F retype their arguments; other uses of F (e.g.
+          // passing it as an argument) are wrapped by bitcastGlobalValues
+          if (CI->getCalledOperand() != &F)
+            continue;
           assert(isNoopCast(CI->getArgOperand(i)));
           PointerMap[CI->getArgOperand(i)] = cast<TypedPointerType>(NewTy);
         }
@@ -533,8 +695,15 @@ PointerRewriter::orderedPointerTypes(const Module &M,
     if (TypedPointerType *Ty = PointerMap.lookup(V))
       Order.push_back(Ty);
   };
-  for (const GlobalVariable &GV : M.globals())
+  for (const GlobalVariable &GV : M.globals()) {
     add(&GV);
+    if (GV.hasInitializer())
+      add(GV.getInitializer());
+  }
+  for (const GlobalAlias &GA : M.aliases())
+    add(&GA);
+  for (const GlobalIFunc &GIF : M.ifuncs())
+    add(&GIF);
   for (const Function &F : M)
     add(&F);
   for (const Function &F : M)
@@ -547,13 +716,176 @@ PointerRewriter::orderedPointerTypes(const Module &M,
   return Order;
 }
 
+// The legacy spelling of a pointer-typed intrinsic's name, or empty if the
+// intrinsic needs no renaming. LLVM 15+ progressively dropped the pointee
+// type from the mangling (p0i8 -> p0) and, for some intrinsics, the mangling
+// or a parameter altogether; legacy readers match intrinsics by name, so the
+// old spelling has to be restored.
+static std::string legacyIntrinsicName(const Function &F,
+                                       unsigned TargetMajor) {
+  auto *FTy = F.getFunctionType();
+  auto ptrSuffix = [&](unsigned ParamIdx) {
+    return ".p" +
+           std::to_string(
+               FTy->getParamType(ParamIdx)->getPointerAddressSpace()) +
+           "i8";
+  };
+  auto intSuffix = [&](unsigned ParamIdx) {
+    return ".i" + std::to_string(cast<IntegerType>(FTy->getParamType(ParamIdx))
+                                     ->getBitWidth());
+  };
+
+  switch (F.getIntrinsicID()) {
+  case Intrinsic::vastart:
+    return "llvm.va_start";
+  case Intrinsic::vaend:
+    return "llvm.va_end";
+  case Intrinsic::vacopy:
+    return "llvm.va_copy";
+  case Intrinsic::stacksave:
+    return "llvm.stacksave";
+  case Intrinsic::stackrestore:
+    return "llvm.stackrestore";
+  case Intrinsic::thread_pointer:
+    return "llvm.thread.pointer";
+  case Intrinsic::prefetch:
+    // prefetch gained its pointer mangling in LLVM 10
+    return TargetMajor >= 10 ? "llvm.prefetch" + ptrSuffix(0)
+                             : "llvm.prefetch";
+  case Intrinsic::memcpy:
+    return "llvm.memcpy" + ptrSuffix(0) + ptrSuffix(1) + intSuffix(2);
+  case Intrinsic::memmove:
+    return "llvm.memmove" + ptrSuffix(0) + ptrSuffix(1) + intSuffix(2);
+  case Intrinsic::memset:
+    return "llvm.memset" + ptrSuffix(0) + intSuffix(2);
+  default:
+    return std::string();
+  }
+}
+
+// Remove llvm.lifetime.start/end markers: LLVM 22 dropped their size
+// argument, so the modern form cannot be expressed against any legacy
+// signature (old readers upgrade the call by name and crash on the missing
+// argument). They are pure optimization hints, so dropping them is safe.
+static bool dropLifetimeIntrinsics(Module &M) {
+  bool Changed = false;
+  for (Function &F : llvm::make_early_inc_range(M)) {
+    if (F.getIntrinsicID() != Intrinsic::lifetime_start &&
+        F.getIntrinsicID() != Intrinsic::lifetime_end)
+      continue;
+    for (User *U : llvm::make_early_inc_range(F.users()))
+      if (auto *CI = dyn_cast<CallInst>(U))
+        CI->eraseFromParent();
+    if (F.use_empty())
+      F.eraseFromParent();
+    Changed = true;
+  }
+  return Changed;
+}
+
+// LLVM 7 moved the memory intrinsics' alignment into parameter attributes;
+// LLVM 5 requires the explicit i32 align argument, so rebuild declarations
+// and calls with it (conservatively the minimum of the pointer alignments).
+static bool addMemIntrinsicAlignArg(Module &M) {
+  bool Changed = false;
+  for (Function &F : llvm::make_early_inc_range(M)) {
+    Intrinsic::ID ID = F.getIntrinsicID();
+    if (ID != Intrinsic::memcpy && ID != Intrinsic::memmove &&
+        ID != Intrinsic::memset)
+      continue;
+    auto *FTy = F.getFunctionType();
+    if (FTy->getNumParams() != 4)
+      continue;
+
+    Type *I32Ty = Type::getInt32Ty(M.getContext());
+    SmallVector<Type *, 5> Params(FTy->params().begin(), FTy->params().end());
+    Params.insert(Params.begin() + 3, I32Ty);
+    auto *NewFTy =
+        FunctionType::get(FTy->getReturnType(), Params, /*isVarArg=*/false);
+    std::string Name = F.getName().str();
+    Function *NewF = Function::Create(NewFTy, F.getLinkage(), "", &M);
+
+    for (User *U : llvm::make_early_inc_range(F.users())) {
+      auto *CI = cast<CallInst>(U);
+      uint64_t Align = CI->getParamAlign(0).valueOrOne().value();
+      if (ID != Intrinsic::memset)
+        Align = std::min(Align,
+                         CI->getParamAlign(1).valueOrOne().value());
+      SmallVector<Value *, 5> Args(CI->arg_begin(), CI->arg_end());
+      Args.insert(Args.begin() + 3, ConstantInt::get(I32Ty, Align));
+      auto *NewCI = CallInst::Create(NewFTy, NewF, Args, "", CI->getIterator());
+      NewCI->setDebugLoc(CI->getDebugLoc());
+      CI->eraseFromParent();
+    }
+
+    F.eraseFromParent();
+    NewF->setName(Name);
+    Changed = true;
+  }
+  return Changed;
+}
+
+bool PointerRewriter::prepareIntrinsics(Module &M, unsigned TargetMajor) {
+  bool Changed = dropLifetimeIntrinsics(M);
+  if (TargetMajor < 7)
+    Changed |= addMemIntrinsicAlignArg(M);
+  for (Function &F : M) {
+    if (!F.isIntrinsic())
+      continue;
+    std::string Name = legacyIntrinsicName(F, TargetMajor);
+    if (!Name.empty() && F.getName() != Name) {
+      F.setName(Name);
+      Changed = true;
+    }
+  }
+  return Changed;
+}
+
+void PointerRewriter::checkIntrinsics(Module &M) {
+  for (const Function &F : M) {
+    if (!F.isIntrinsic() || F.use_empty())
+      continue;
+    auto *FTy = F.getFunctionType();
+    bool HasPtr = FTy->getReturnType()->isPtrOrPtrVectorTy();
+    for (Type *P : FTy->params())
+      HasPtr |= P->isPtrOrPtrVectorTy();
+    if (!HasPtr)
+      continue;
+    // Intrinsics with a known typed signature are fine; anything else would
+    // be emitted with {}*-typed pointers against the old typed signature.
+    if (getTypedFunctionType(&F) != FTy)
+      continue;
+    report_fatal_error(Twine("intrinsic with pointer arguments cannot be "
+                             "downgraded: ") +
+                           F.getName(),
+                       false);
+  }
+}
+
+// bitcast instruction uses of blockaddress constants, which are emitted with
+// the legacy i8* type
+static bool bitcastBlockAddresses(Module &M) {
+  SmallSetVector<BlockAddress *, 8> BAs;
+  for (Function &F : M)
+    for (BasicBlock &BB : F)
+      for (Instruction &I : BB)
+        for (const Use &Op : I.operands())
+          if (auto *BA = dyn_cast<BlockAddress>(Op))
+            BAs.insert(BA);
+  for (BlockAddress *BA : BAs)
+    replaceWithBitcast(M, BA);
+  return !BAs.empty();
+}
+
 bool PointerRewriter::run() {
   bool Changed = demotePointerConstants(M);
 
   // insert no-op bitcasts surrounding pointer values
-  Changed |= bitcastGlobals(M);
+  Changed |= bitcastGlobalValues(M);
+  Changed |= bitcastBlockAddresses(M);
   Changed |= bitcastInstructionOperands(M);
   Changed |= bitcastFunctionOperands(M);
+  Changed |= bitcastTypedArguments(M);
 
   // TODO: remove double bitcasts?
 
