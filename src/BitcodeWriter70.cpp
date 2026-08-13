@@ -704,8 +704,6 @@ uint64_t getAttrKindEncoding70(Attribute::AttrKind Kind) {
     return bitc::ATTR_KIND_SWIFT_ERROR;
   case Attribute::SwiftSelf:
     return bitc::ATTR_KIND_SWIFT_SELF;
-  case Attribute::UWTable:
-    report_fatal_error("uwtable attribute is not supported in 7.0", false);
   case Attribute::WriteOnly:
     return bitc::ATTR_KIND_WRITEONLY;
   case Attribute::ZExt:
@@ -719,6 +717,122 @@ uint64_t getAttrKindEncoding70(Attribute::AttrKind Kind) {
   llvm_unreachable("Trying to encode unknown attribute");
 }
 
+// Append the LLVM 7.0 encoding of Attr to Record, returning how many attribute
+// entries were emitted. A null Record only counts. ValueEnumerator70 uses the
+// counting mode (via countEncodableAttrs70) to decide which attribute groups
+// exist at all, so the two must agree exactly: a group is dropped if and only
+// if the writer would emit an empty record for it.
+unsigned encodeAttribute70(const Attribute &Attr,
+                           SmallVectorImpl<uint64_t> *Record) {
+  auto Emit = [&](std::initializer_list<uint64_t> Vals) {
+    if (Record)
+      Record->append(Vals);
+  };
+
+  // The memory(...) attribute postdates 7.0; decompose the MemoryEffects into
+  // the legacy standalone enum attributes the 7.0 reader (and verifier) knows.
+  if (Attr.hasAttribute(Attribute::Memory)) {
+    unsigned N = 0;
+    MemoryEffects ME = Attr.getMemoryEffects();
+    auto EmitEnum = [&](uint64_t Code) {
+      Emit({0, Code});
+      ++N;
+    };
+    if (ME.doesNotAccessMemory())
+      EmitEnum(bitc::ATTR_KIND_READ_NONE);
+    else {
+      if (ME.onlyReadsMemory())
+        EmitEnum(bitc::ATTR_KIND_READ_ONLY);
+      else if (ME.onlyWritesMemory())
+        EmitEnum(bitc::ATTR_KIND_WRITEONLY);
+      if (ME.onlyAccessesArgPointees())
+        EmitEnum(bitc::ATTR_KIND_ARGMEMONLY);
+      else if (ME.onlyAccessesInaccessibleMem())
+        EmitEnum(bitc::ATTR_KIND_INACCESSIBLEMEM_ONLY);
+      else if (ME.onlyAccessesInaccessibleOrArgMem())
+        EmitEnum(bitc::ATTR_KIND_INACCESSIBLEMEM_OR_ARGMEMONLY);
+    }
+    return N;
+  }
+
+  // LLVM 21 replaced nocapture with the richer captures(...) attribute. LLVM
+  // 7.0 only has nocapture, equivalent to captures(none); drop any weaker
+  // capture information.
+  if (Attr.hasAttribute(Attribute::Captures)) {
+    if (!capturesNothing(Attr.getCaptureInfo()))
+      return 0;
+    Emit({0, bitc::ATTR_KIND_NO_CAPTURE});
+    return 1;
+  }
+
+  // uwtable became an int attribute (sync/async) in LLVM 15. Both kinds ask
+  // codegen for unwind tables, which is also what the legacy plain uwtable
+  // does, so emit that rather than dropping the attribute.
+  if (Attr.hasAttribute(Attribute::UWTable)) {
+    Emit({0, bitc::ATTR_KIND_UW_TABLE});
+    return 1;
+  }
+
+  if (Attr.isEnumAttribute() || Attr.isIntAttribute()) {
+    // only encode attributes that are supported by LLVM 7.0
+    const uint64_t Enc = getAttrKindEncoding70(Attr.getKindAsEnum());
+    if (Enc == bitc::ATTR_KIND_INVALID)
+      return 0;
+    if (Attr.isEnumAttribute())
+      Emit({0, Enc});
+    else
+      Emit({1, Enc, Attr.getValueAsInt()});
+    return 1;
+  }
+
+  if (Attr.isStringAttribute()) {
+    if (Record) {
+      StringRef Kind = Attr.getKindAsString();
+      StringRef Val = Attr.getValueAsString();
+
+      Record->push_back(Val.empty() ? 3 : 4);
+      Record->append(Kind.begin(), Kind.end());
+      Record->push_back(0);
+      if (!Val.empty()) {
+        Record->append(Val.begin(), Val.end());
+        Record->push_back(0);
+      }
+    }
+    return 1;
+  }
+
+  if (Attr.isTypeAttribute()) {
+    // Type attributes postdate 7.0, but byval/sret/inalloca exist there as
+    // plain enum attributes: the payload type is implied by the pointer
+    // element type of the parameter, which the PointerRewriter reconstructs
+    // from these same attributes.
+    switch (Attr.getKindAsEnum()) {
+    case Attribute::ByVal:
+      Emit({0, bitc::ATTR_KIND_BY_VAL});
+      return 1;
+    case Attribute::StructRet:
+      Emit({0, bitc::ATTR_KIND_STRUCT_RET});
+      return 1;
+    case Attribute::InAlloca:
+      Emit({0, bitc::ATTR_KIND_IN_ALLOCA});
+      return 1;
+    default: // byref/preallocated/elementtype have no 7.0 equivalent.
+      return 0;
+    }
+  }
+
+  // Remaining kinds (the ConstantRange(-list) attributes range/initializes)
+  // are pure optimization hints with no legacy encoding.
+  return 0;
+}
+
+unsigned countEncodableAttrs70(const AttributeSet &AS) {
+  unsigned N = 0;
+  for (Attribute Attr : AS)
+    N += encodeAttribute70(Attr, nullptr);
+  return N;
+}
+
 void ModuleBitcodeWriter70::writeAttributeGroupTable() {
   const std::vector<ValueEnumerator70::IndexAndAttrSet> &AttrGrps =
       VE.getAttributeGroups();
@@ -728,57 +842,17 @@ void ModuleBitcodeWriter70::writeAttributeGroupTable() {
 
   SmallVector<uint64_t, 64> Record;
   for (ValueEnumerator70::IndexAndAttrSet Pair : AttrGrps) {
+    if (Pair.first == ValueEnumerator70::invalid_attribute_group_id) {
+      // this complete set/group can't be encoded for 7.0
+      continue;
+    }
     unsigned AttrListIndex = Pair.first;
     AttributeSet AS = Pair.second;
     Record.push_back(VE.getAttributeGroupID(Pair));
     Record.push_back(AttrListIndex);
 
-    for (Attribute Attr : AS) {
-      if (Attr.isEnumAttribute() || Attr.isIntAttribute()) {
-        // LLVM 21 replaced nocapture with the richer captures(...) attribute.
-        // LLVM 7.0 only has nocapture, equivalent to captures(none); drop any
-        // weaker capture information.
-        if (Attr.getKindAsEnum() == Attribute::Captures) {
-          if (Attr.getValueAsInt() == CaptureInfo::none().toIntValue()) {
-            Record.push_back(0);
-            Record.push_back(bitc::ATTR_KIND_NO_CAPTURE);
-          }
-          continue;
-        }
-        // only encode attributes that are supported by LLVM 7.0
-        const auto enc_attr = getAttrKindEncoding70(Attr.getKindAsEnum());
-        if (enc_attr != llvm::bitc::ATTR_KIND_INVALID) {
-          if (Attr.isEnumAttribute()) {
-            Record.push_back(0);
-            Record.push_back(enc_attr);
-          } else {
-            Record.push_back(1);
-            Record.push_back(enc_attr);
-            Record.push_back(Attr.getValueAsInt());
-          }
-        }
-      } else if (Attr.isStringAttribute()) {
-        StringRef Kind = Attr.getKindAsString();
-        StringRef Val = Attr.getValueAsString();
-
-        Record.push_back(Val.empty() ? 3 : 4);
-        Record.append(Kind.begin(), Kind.end());
-        Record.push_back(0);
-        if (!Val.empty()) {
-          Record.append(Val.begin(), Val.end());
-          Record.push_back(0);
-        }
-      } else {
-        assert(Attr.isTypeAttribute());
-        // type attributes are not supported by LLVM 7.0, but we do want to encode byval
-        if (Attr.getKindAsEnum() == Attribute::ByVal) {
-          const auto enc_attr = getAttrKindEncoding70(Attr.getKindAsEnum());
-          Record.push_back(0);
-          Record.push_back(enc_attr);
-          // the byval type is not supported by LLVM 7.0
-        }
-      }
-    }
+    for (Attribute Attr : AS)
+      encodeAttribute70(Attr, &Record);
 
     Stream.EmitRecord(bitc::PARAMATTR_GRP_CODE_ENTRY, Record);
     Record.clear();
@@ -798,7 +872,9 @@ void ModuleBitcodeWriter70::writeAttributeTable() {
     for (unsigned i : AL.indexes()) {
       AttributeSet AS = AL.getAttributes(i);
       if (AS.hasAttributes())
-        Record.push_back(VE.getAttributeGroupID({i, AS}));
+        if (const auto group_id = VE.getAttributeGroupID({i, AS});
+            group_id != ValueEnumerator70::invalid_attribute_group_id)
+          Record.push_back(group_id);
     }
 
     Stream.EmitRecord(bitc::PARAMATTR_CODE_ENTRY, Record);

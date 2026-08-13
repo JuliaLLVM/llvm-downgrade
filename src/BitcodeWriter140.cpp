@@ -623,8 +623,14 @@ static void writeStringRecord(BitstreamWriter &Stream, unsigned Code,
   Stream.EmitRecord(Code, Vals, AbbrevToUse);
 }
 
+// Returns ATTR_KIND_INVALID for attribute kinds with no LLVM 14 encoding
+// (those introduced later); the caller drops them. uwtable/memory/captures are
+// handled by encodeAttribute140 before this table is consulted, since their
+// modern representations need translation rather than a 1:1 code mapping.
 static uint64_t getAttrKindEncoding140(Attribute::AttrKind Kind) {
   switch (Kind) {
+  default:
+    return bitc::ATTR_KIND_INVALID;
   case Attribute::Alignment:
     return bitc::ATTR_KIND_ALIGNMENT;
   case Attribute::AllocSize:
@@ -751,8 +757,6 @@ static uint64_t getAttrKindEncoding140(Attribute::AttrKind Kind) {
     return bitc::ATTR_KIND_SWIFT_SELF;
   case Attribute::SwiftAsync:
     return bitc::ATTR_KIND_SWIFT_ASYNC;
-  case Attribute::UWTable:
-    return bitc::ATTR_KIND_UW_TABLE;
   case Attribute::VScaleRange:
     return bitc::ATTR_KIND_VSCALE_RANGE;
   case Attribute::WillReturn:
@@ -773,16 +777,122 @@ static uint64_t getAttrKindEncoding140(Attribute::AttrKind Kind) {
     return bitc::ATTR_KIND_BYREF;
   case Attribute::MustProgress:
     return bitc::ATTR_KIND_MUSTPROGRESS;
-  case Attribute::EndAttrKinds:
-    llvm_unreachable("Can not encode end-attribute kinds marker.");
-  case Attribute::None:
-    llvm_unreachable("Can not encode none-attribute.");
-  case Attribute::EmptyKey:
-  case Attribute::TombstoneKey:
-    llvm_unreachable("Trying to encode EmptyKey/TombstoneKey");
+  }
+}
+
+// Append the LLVM 14 encoding of Attr to Record, returning how many attribute
+// entries were emitted. A null Record only counts (VE may then be null too).
+// ValueEnumerator140 uses the counting mode (via countEncodableAttrs140) to
+// decide which attribute groups exist at all, so the two must agree exactly: a
+// group is dropped if and only if the writer would emit an empty record for it
+// (which the LLVM 14 reader rejects).
+unsigned encodeAttribute140(const Attribute &Attr,
+                            SmallVectorImpl<uint64_t> *Record,
+                            const ValueEnumerator140 *VE) {
+  auto Emit = [&](std::initializer_list<uint64_t> Vals) {
+    if (Record)
+      Record->append(Vals);
+  };
+
+  // LLVM 14 has no memory(...) attribute; decompose the MemoryEffects into
+  // the legacy standalone enum attributes the LLVM 14 reader knows.
+  if (Attr.hasAttribute(Attribute::Memory)) {
+    unsigned N = 0;
+    MemoryEffects ME = Attr.getMemoryEffects();
+    auto EmitEnum = [&](uint64_t Code) {
+      Emit({0, Code});
+      ++N;
+    };
+    if (ME.doesNotAccessMemory())
+      EmitEnum(bitc::ATTR_KIND_READ_NONE);
+    else {
+      if (ME.onlyReadsMemory())
+        EmitEnum(bitc::ATTR_KIND_READ_ONLY);
+      else if (ME.onlyWritesMemory())
+        EmitEnum(bitc::ATTR_KIND_WRITEONLY);
+      if (ME.onlyAccessesArgPointees())
+        EmitEnum(bitc::ATTR_KIND_ARGMEMONLY);
+      else if (ME.onlyAccessesInaccessibleMem())
+        EmitEnum(bitc::ATTR_KIND_INACCESSIBLEMEM_ONLY);
+      else if (ME.onlyAccessesInaccessibleOrArgMem())
+        EmitEnum(bitc::ATTR_KIND_INACCESSIBLEMEM_OR_ARGMEMONLY);
+    }
+    return N;
   }
 
-  llvm_unreachable("Trying to encode unknown attribute");
+  // LLVM 14 has no captures(...) attribute; it only knows the legacy
+  // standalone "nocapture" enum attribute. Emit it when the pointer is
+  // not captured at all; otherwise drop the (conservative) hint.
+  if (Attr.hasAttribute(Attribute::Captures)) {
+    if (!capturesNothing(Attr.getCaptureInfo()))
+      return 0;
+    Emit({0, bitc::ATTR_KIND_NO_CAPTURE});
+    return 1;
+  }
+
+  // uwtable became an int attribute (sync/async) in LLVM 15; emitting it as
+  // one produces bitcode LLVM 14 rejects ("Not an int attribute"). Both kinds
+  // ask codegen for unwind tables, which is also what LLVM 14's plain enum
+  // uwtable does, so emit that.
+  if (Attr.hasAttribute(Attribute::UWTable)) {
+    Emit({0, bitc::ATTR_KIND_UW_TABLE});
+    return 1;
+  }
+
+  if (Attr.isEnumAttribute() || Attr.isIntAttribute()) {
+    // Attribute kinds introduced after LLVM 14 (nofpclass, allockind,
+    // dead_on_unwind, nocreateundeforpoison, ...) have no LLVM 14 encoding;
+    // they are optimization hints, so drop them.
+    const uint64_t Enc = getAttrKindEncoding140(Attr.getKindAsEnum());
+    if (Enc == bitc::ATTR_KIND_INVALID)
+      return 0;
+    if (Attr.isEnumAttribute())
+      Emit({0, Enc});
+    else
+      Emit({1, Enc, Attr.getValueAsInt()});
+    return 1;
+  }
+
+  if (Attr.isStringAttribute()) {
+    if (Record) {
+      StringRef Kind = Attr.getKindAsString();
+      StringRef Val = Attr.getValueAsString();
+
+      Record->push_back(Val.empty() ? 3 : 4);
+      Record->append(Kind.begin(), Kind.end());
+      Record->push_back(0);
+      if (!Val.empty()) {
+        Record->append(Val.begin(), Val.end());
+        Record->push_back(0);
+      }
+    }
+    return 1;
+  }
+
+  if (Attr.isTypeAttribute()) {
+    const uint64_t Enc = getAttrKindEncoding140(Attr.getKindAsEnum());
+    if (Enc == bitc::ATTR_KIND_INVALID)
+      return 0;
+    Type *Ty = Attr.getValueAsType();
+    if (Record) {
+      Record->push_back(Ty ? 6 : 5);
+      Record->push_back(Enc);
+      if (Ty)
+        Record->push_back(VE->getTypeID(Ty));
+    }
+    return 1;
+  }
+
+  // Remaining kinds (the ConstantRange(-list) attributes range/initializes)
+  // have no LLVM 14 encoding -- and Metal's AIR loader rejects them; drop.
+  return 0;
+}
+
+unsigned countEncodableAttrs140(const AttributeSet &AS) {
+  unsigned N = 0;
+  for (Attribute Attr : AS)
+    N += encodeAttribute140(Attr, nullptr, nullptr);
+  return N;
 }
 
 void ModuleBitcodeWriter140::writeAttributeGroupTable() {
@@ -794,71 +904,17 @@ void ModuleBitcodeWriter140::writeAttributeGroupTable() {
 
   SmallVector<uint64_t, 64> Record;
   for (ValueEnumerator140::IndexAndAttrSet Pair : AttrGrps) {
+    if (Pair.first == ValueEnumerator140::invalid_attribute_group_id) {
+      // this complete set/group can't be encoded for 14.0
+      continue;
+    }
     unsigned AttrListIndex = Pair.first;
     AttributeSet AS = Pair.second;
     Record.push_back(VE.getAttributeGroupID(Pair));
     Record.push_back(AttrListIndex);
 
-    for (Attribute Attr : AS) {
-      if (Attr.hasAttribute(Attribute::Memory)) {
-        // LLVM 14 has no memory(...) attribute; decompose the MemoryEffects
-        // into the legacy standalone enum attributes the LLVM 14 reader knows.
-        MemoryEffects ME = Attr.getMemoryEffects();
-        auto EmitEnum = [&](uint64_t Code) {
-          Record.push_back(0);
-          Record.push_back(Code);
-        };
-        if (ME.doesNotAccessMemory())
-          EmitEnum(bitc::ATTR_KIND_READ_NONE);
-        else {
-          if (ME.onlyReadsMemory())
-            EmitEnum(bitc::ATTR_KIND_READ_ONLY);
-          else if (ME.onlyWritesMemory())
-            EmitEnum(bitc::ATTR_KIND_WRITEONLY);
-          if (ME.onlyAccessesArgPointees())
-            EmitEnum(bitc::ATTR_KIND_ARGMEMONLY);
-          else if (ME.onlyAccessesInaccessibleMem())
-            EmitEnum(bitc::ATTR_KIND_INACCESSIBLEMEM_ONLY);
-          else if (ME.onlyAccessesInaccessibleOrArgMem())
-            EmitEnum(bitc::ATTR_KIND_INACCESSIBLEMEM_OR_ARGMEMONLY);
-        }
-      } else if (Attr.hasAttribute(Attribute::Captures)) {
-        // LLVM 14 has no captures(...) attribute; it only knows the legacy
-        // standalone "nocapture" enum attribute. Emit it when the pointer is
-        // not captured at all; otherwise drop the (conservative) hint.
-        if (capturesNothing(Attr.getCaptureInfo())) {
-          Record.push_back(0);
-          Record.push_back(bitc::ATTR_KIND_NO_CAPTURE);
-        }
-      } else if (Attr.isEnumAttribute()) {
-        Record.push_back(0);
-        Record.push_back(getAttrKindEncoding140(Attr.getKindAsEnum()));
-      } else if (Attr.isIntAttribute()) {
-        Record.push_back(1);
-        Record.push_back(getAttrKindEncoding140(Attr.getKindAsEnum()));
-        Record.push_back(Attr.getValueAsInt());
-      } else if (Attr.isStringAttribute()) {
-        StringRef Kind = Attr.getKindAsString();
-        StringRef Val = Attr.getValueAsString();
-
-        Record.push_back(Val.empty() ? 3 : 4);
-        Record.append(Kind.begin(), Kind.end());
-        Record.push_back(0);
-        if (!Val.empty()) {
-          Record.append(Val.begin(), Val.end());
-          Record.push_back(0);
-        }
-      } else if (Attr.isTypeAttribute()) {
-        Type *Ty = Attr.getValueAsType();
-        Record.push_back(Ty ? 6 : 5);
-        Record.push_back(getAttrKindEncoding140(Attr.getKindAsEnum()));
-        if (Ty)
-          Record.push_back(VE.getTypeID(Attr.getValueAsType()));
-      } else {
-        // Attribute kinds introduced after LLVM 14 (range/initializes/captures)
-        // have no LLVM 14 encoding -- and Metal's AIR loader rejects them; drop.
-      }
-    }
+    for (Attribute Attr : AS)
+      encodeAttribute140(Attr, &Record, &VE);
 
     Stream.EmitRecord(bitc::PARAMATTR_GRP_CODE_ENTRY, Record);
     Record.clear();
@@ -878,7 +934,9 @@ void ModuleBitcodeWriter140::writeAttributeTable() {
     for (unsigned i : AL.indexes()) {
       AttributeSet AS = AL.getAttributes(i);
       if (AS.hasAttributes())
-        Record.push_back(VE.getAttributeGroupID({i, AS}));
+        if (const auto group_id = VE.getAttributeGroupID({i, AS});
+            group_id != ValueEnumerator140::invalid_attribute_group_id)
+          Record.push_back(group_id);
     }
 
     Stream.EmitRecord(bitc::PARAMATTR_CODE_ENTRY, Record);

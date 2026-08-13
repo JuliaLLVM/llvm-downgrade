@@ -1034,6 +1034,10 @@ void ValueEnumerator140::EnumerateOperandType(const Value *V) {
   }
 }
 
+// Defined in BitcodeWriter140.cpp; counts how many attribute entries the
+// writer will emit for AS, so unencodable groups can be dropped consistently.
+extern unsigned countEncodableAttrs140(const AttributeSet &AS);
+
 void ValueEnumerator140::EnumerateAttributes(AttributeList PAL) {
   if (PAL.isEmpty()) return;  // null is always 0.
 
@@ -1050,7 +1054,16 @@ void ValueEnumerator140::EnumerateAttributes(AttributeList PAL) {
     AttributeSet AS = PAL.getAttributes(i);
     if (!AS.hasAttributes())
       continue;
-    IndexAndAttrSet Pair = {i, AS};
+    // Skip attribute sets for which the writer would emit an empty group
+    // record (which the LLVM 14 reader rejects), e.g. a lone memory(readwrite)
+    // or captures(...) that decomposes to nothing. countEncodableAttrs140 is
+    // the counting mode of the writer's own encoding function, so the two
+    // cannot drift apart.
+    auto AS_index = i;
+    if (countEncodableAttrs140(AS) == 0) {
+      AS_index = invalid_attribute_group_id;
+    }
+    IndexAndAttrSet Pair = {AS_index, AS};
     unsigned &Entry = AttributeGroupMap[Pair];
     if (Entry == 0) {
       AttributeGroups.push_back(Pair);

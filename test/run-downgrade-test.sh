@@ -112,7 +112,8 @@ for ver in $versions; do
   fi
   prefixes=CHECK
   grep -q "CHECK-V$n:" "$TEST" && prefixes="CHECK,CHECK-V$n"
-  if "$FILECHECK" --check-prefixes="$prefixes" "$TEST" <"$out" 2>"$err"; then
+  # --allow-unused-prefixes: a test may use only per-version prefixes.
+  if "$FILECHECK" --check-prefixes="$prefixes" --allow-unused-prefixes "$TEST" <"$out" 2>"$err"; then
     echo "PASS  $name v$ver"; pass=$((pass+1))
   else
     echo "FAIL  $name v$ver (FileCheck): $(grep -m1 'error:' "$err")"; fail=$((fail+1))
