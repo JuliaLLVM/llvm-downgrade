@@ -26,9 +26,7 @@ jobs:
           - target: '14.0'
             dis_product: llvm_dis_14_path
             dis_option: LLVMDG_DIS_14_0
-          # LLVMDowngrader_jll does not ship llvm-dis-15/-18 until v0.9, so the
-          # 15.0/18.0 disassemblers come from the upstream releases via
-          # LLVM_full_jll instead (which only makes them a better oracle).
+          # LLVMDowngrader_jll does not ship llvm-dis-15/-18, so use LLVM_full_jll
           - target: '15.0'
             llvm_full: '15.0.7'
             dis_option: LLVMDG_DIS_15_0
