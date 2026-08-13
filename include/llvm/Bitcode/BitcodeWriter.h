@@ -295,6 +295,84 @@ public:
     static bool prepareModule(Module &M);
   };
 
+  // Writes genuine LLVM 15 bitcode (opaque pointers). A downgrade target for
+  // consumers on the LLVM 15 toolchain generation.
+  class BitcodeWriter150 {
+    SmallVectorImpl<char> &Buffer;
+    std::unique_ptr<BitstreamWriter> Stream;
+
+    StringTableBuilder StrtabBuilder{StringTableBuilder::RAW};
+
+    // Owns any strings created by the irsymtab writer until we create the
+    // string table.
+    BumpPtrAllocator Alloc;
+
+    bool WroteStrtab = false, WroteSymtab = false;
+
+    void writeBlob(unsigned Block, unsigned Record, StringRef Blob);
+
+    std::vector<Module *> Mods;
+
+  public:
+    /// Create a BitcodeWriter150 that writes to Buffer.
+    BitcodeWriter150(SmallVectorImpl<char> &Buffer, raw_fd_stream *FS = nullptr);
+
+    ~BitcodeWriter150();
+
+    void writeSymtab();
+    void writeStrtab();
+    void copyStrtab(StringRef Strtab);
+    void writeModule(const Module &M, bool ShouldPreserveUseListOrder = false,
+                     const ModuleSummaryIndex *Index = nullptr,
+                     bool GenerateHash = false, ModuleHash *ModHash = nullptr);
+    void writeThinLinkBitcode(const Module &M, const ModuleSummaryIndex &Index,
+                              const ModuleHash &ModHash);
+    void writeIndex(
+        const ModuleSummaryIndex *Index,
+        const std::map<std::string, GVSummaryMapTy> *ModuleToSummariesForIndex);
+
+    static bool prepareModule(Module &M);
+  };
+
+  // Writes genuine LLVM 18 bitcode (opaque pointers). A downgrade target for
+  // consumers on the LLVM 18 toolchain generation.
+  class BitcodeWriter180 {
+    SmallVectorImpl<char> &Buffer;
+    std::unique_ptr<BitstreamWriter> Stream;
+
+    StringTableBuilder StrtabBuilder{StringTableBuilder::RAW};
+
+    // Owns any strings created by the irsymtab writer until we create the
+    // string table.
+    BumpPtrAllocator Alloc;
+
+    bool WroteStrtab = false, WroteSymtab = false;
+
+    void writeBlob(unsigned Block, unsigned Record, StringRef Blob);
+
+    std::vector<Module *> Mods;
+
+  public:
+    /// Create a BitcodeWriter180 that writes to Buffer.
+    BitcodeWriter180(SmallVectorImpl<char> &Buffer, raw_fd_stream *FS = nullptr);
+
+    ~BitcodeWriter180();
+
+    void writeSymtab();
+    void writeStrtab();
+    void copyStrtab(StringRef Strtab);
+    void writeModule(const Module &M, bool ShouldPreserveUseListOrder = false,
+                     const ModuleSummaryIndex *Index = nullptr,
+                     bool GenerateHash = false, ModuleHash *ModHash = nullptr);
+    void writeThinLinkBitcode(const Module &M, const ModuleSummaryIndex &Index,
+                              const ModuleHash &ModHash);
+    void writeIndex(
+        const ModuleSummaryIndex *Index,
+        const std::map<std::string, GVSummaryMapTy> *ModuleToSummariesForIndex);
+
+    static bool prepareModule(Module &M);
+  };
+
 /// Write the specified module to the specified raw output stream.
 ///
 /// For streams where it matters, the given stream should be in "binary"
@@ -340,6 +418,18 @@ LLVM_ABI void WriteBitcodeToFile(const Module &M, raw_ostream &Out,
                              bool GenerateHash = false,
                              ModuleHash *ModHash = nullptr);
 
+  void WriteBitcode150ToFile(const Module &M, raw_ostream &Out,
+                             bool ShouldPreserveUseListOrder = false,
+                             const ModuleSummaryIndex *Index = nullptr,
+                             bool GenerateHash = false,
+                             ModuleHash *ModHash = nullptr);
+
+  void WriteBitcode180ToFile(const Module &M, raw_ostream &Out,
+                             bool ShouldPreserveUseListOrder = false,
+                             const ModuleSummaryIndex *Index = nullptr,
+                             bool GenerateHash = false,
+                             ModuleHash *ModHash = nullptr);
+
 /// Write the specified thin link bitcode file (i.e., the minimized bitcode
 /// file) to the given raw output stream, where it will be written in a new
 /// bitcode block. The thin link bitcode file is used for thin link, and it
@@ -371,6 +461,14 @@ void WriteIndex50ToFile(const ModuleSummaryIndex &Index, raw_ostream &Out,
                               *ModuleToSummariesForIndex = nullptr);
 
   void WriteIndex140ToFile(const ModuleSummaryIndex &Index, raw_ostream &Out,
+                           const std::map<std::string, GVSummaryMapTy>
+                               *ModuleToSummariesForIndex = nullptr);
+
+  void WriteIndex150ToFile(const ModuleSummaryIndex &Index, raw_ostream &Out,
+                           const std::map<std::string, GVSummaryMapTy>
+                               *ModuleToSummariesForIndex = nullptr);
+
+  void WriteIndex180ToFile(const ModuleSummaryIndex &Index, raw_ostream &Out,
                            const std::map<std::string, GVSummaryMapTy>
                                *ModuleToSummariesForIndex = nullptr);
 

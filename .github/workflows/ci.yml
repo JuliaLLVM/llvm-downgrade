@@ -26,6 +26,16 @@ jobs:
           - target: '14.0'
             dis_product: llvm_dis_14_path
             dis_option: LLVMDG_DIS_14_0
+          # LLVMDowngrader_jll does not ship llvm-dis-15/-18, so use LLVM_full_jll
+          # (which also ships opt, letting the tests run the legacy verifier)
+          - target: '15.0'
+            llvm_full: '15.0.7'
+            dis_option: LLVMDG_DIS_15_0
+            opt_option: LLVMDG_OPT_15_0
+          - target: '18.0'
+            llvm_full: '18.1.7'
+            dis_option: LLVMDG_DIS_18_0
+            opt_option: LLVMDG_OPT_18_0
 
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +51,8 @@ jobs:
 
       - uses: julia-actions/cache@v2
 
-      - name: Fetch legacy disassemblers
+      - name: Fetch legacy disassembler (LLVMDowngrader_jll)
+        if: matrix.dis_product
         env:
           DIS_PRODUCT: ${{ matrix.dis_product }}
         run: |
@@ -55,6 +66,23 @@ jobs:
                                                 Symbol(ENV["DIS_PRODUCT"])))
             end'
 
+      - name: Fetch legacy disassembler (LLVM_full_jll)
+        if: matrix.llvm_full
+        env:
+          LLVM_FULL_VERSION: ${{ matrix.llvm_full }}
+        run: |
+          julia -e '
+            using Pkg
+            Pkg.activate(; temp=true)
+            Pkg.add(name="LLVM_full_jll", version=ENV["LLVM_FULL_VERSION"])
+            using LLVM_full_jll
+            open(ENV["GITHUB_ENV"], "a") do io
+                println(io, "DIS=", joinpath(LLVM_full_jll.artifact_dir,
+                                             "tools", "llvm-dis"))
+                println(io, "OPT=", joinpath(LLVM_full_jll.artifact_dir,
+                                             "tools", "opt"))
+            end'
+
       - name: Check legacy disassembler
         run: |
           "$DIS" --version
@@ -62,11 +90,16 @@ jobs:
       - name: Configure
         env:
           DIS_OPTION: ${{ matrix.dis_option }}
+          OPT_OPTION: ${{ matrix.opt_option }}
         run: |
+          EXTRA=()
+          if [[ -n "$OPT_OPTION" ]]; then
+            EXTRA+=(-D"$OPT_OPTION=$OPT")
+          fi
           cmake -B build -S . -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_DIR=/usr/lib/llvm-22/lib/cmake/llvm \
-            -D"$DIS_OPTION=$DIS"
+            -D"$DIS_OPTION=$DIS" "${EXTRA[@]}"
 
       - name: Build
         run: cmake --build build
