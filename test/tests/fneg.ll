@@ -4,5 +4,12 @@ define float @f(float %x) {
   ret float %n
 }
 
+define float @g(float %x) {
+  %n = fneg fast float %x
+  ret float %n
+}
+
 ; CHECK-NOT: = fneg
 ; CHECK: fsub float -0.000000e+00, %x
+; fast-math flags survive the lowering
+; CHECK: fsub fast float -0.000000e+00, %x

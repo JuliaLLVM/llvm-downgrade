@@ -41,8 +41,10 @@
 // cannot be inferred from the IR.
 
 #include "PointerRewriter.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/GlobalAlias.h"
@@ -258,6 +260,20 @@ static FunctionType *getTypedFunctionType(const Function *F) {
           TypedPointerType::get(Type::getInt8Ty(Ctx),
                                 FTy->getReturnType()->getPointerAddressSpace()),
           {}, false);
+    case Intrinsic::memcpy:
+    case Intrinsic::memmove:
+    case Intrinsic::memset: {
+      // void @llvm.memcpy(i8* dst, i8* src, iN len[, i32 align], i1 volatile)
+      // void @llvm.memset(i8* dst, i8 val, iN len[, i32 align], i1 volatile)
+      // (the explicit align argument only exists in the 5.0 form; see
+      // addMemIntrinsicAlignArg)
+      SmallVector<Type *, 5> Params(FTy->params().begin(), FTy->params().end());
+      unsigned NumPtrArgs = F->getIntrinsicID() == Intrinsic::memset ? 1 : 2;
+      for (unsigned i = 0; i < NumPtrArgs; i++)
+        Params[i] = TypedPointerType::get(
+            Type::getInt8Ty(Ctx), Params[i]->getPointerAddressSpace());
+      return FunctionType::get(Type::getVoidTy(Ctx), Params, false);
+    }
     }
   }
 
@@ -698,6 +714,152 @@ PointerRewriter::orderedPointerTypes(const Module &M,
           add(Op.get());
       }
   return Order;
+}
+
+// The legacy spelling of a pointer-typed intrinsic's name, or empty if the
+// intrinsic needs no renaming. LLVM 15+ progressively dropped the pointee
+// type from the mangling (p0i8 -> p0) and, for some intrinsics, the mangling
+// or a parameter altogether; legacy readers match intrinsics by name, so the
+// old spelling has to be restored.
+static std::string legacyIntrinsicName(const Function &F,
+                                       unsigned TargetMajor) {
+  auto *FTy = F.getFunctionType();
+  auto ptrSuffix = [&](unsigned ParamIdx) {
+    return ".p" +
+           std::to_string(
+               FTy->getParamType(ParamIdx)->getPointerAddressSpace()) +
+           "i8";
+  };
+  auto intSuffix = [&](unsigned ParamIdx) {
+    return ".i" + std::to_string(cast<IntegerType>(FTy->getParamType(ParamIdx))
+                                     ->getBitWidth());
+  };
+
+  switch (F.getIntrinsicID()) {
+  case Intrinsic::vastart:
+    return "llvm.va_start";
+  case Intrinsic::vaend:
+    return "llvm.va_end";
+  case Intrinsic::vacopy:
+    return "llvm.va_copy";
+  case Intrinsic::stacksave:
+    return "llvm.stacksave";
+  case Intrinsic::stackrestore:
+    return "llvm.stackrestore";
+  case Intrinsic::thread_pointer:
+    return "llvm.thread.pointer";
+  case Intrinsic::prefetch:
+    // prefetch gained its pointer mangling in LLVM 10
+    return TargetMajor >= 10 ? "llvm.prefetch" + ptrSuffix(0)
+                             : "llvm.prefetch";
+  case Intrinsic::memcpy:
+    return "llvm.memcpy" + ptrSuffix(0) + ptrSuffix(1) + intSuffix(2);
+  case Intrinsic::memmove:
+    return "llvm.memmove" + ptrSuffix(0) + ptrSuffix(1) + intSuffix(2);
+  case Intrinsic::memset:
+    return "llvm.memset" + ptrSuffix(0) + intSuffix(2);
+  default:
+    return std::string();
+  }
+}
+
+// Remove llvm.lifetime.start/end markers: LLVM 22 dropped their size
+// argument, so the modern form cannot be expressed against any legacy
+// signature (old readers upgrade the call by name and crash on the missing
+// argument). They are pure optimization hints, so dropping them is safe.
+static bool dropLifetimeIntrinsics(Module &M) {
+  bool Changed = false;
+  for (Function &F : llvm::make_early_inc_range(M)) {
+    if (F.getIntrinsicID() != Intrinsic::lifetime_start &&
+        F.getIntrinsicID() != Intrinsic::lifetime_end)
+      continue;
+    for (User *U : llvm::make_early_inc_range(F.users()))
+      if (auto *CI = dyn_cast<CallInst>(U))
+        CI->eraseFromParent();
+    if (F.use_empty())
+      F.eraseFromParent();
+    Changed = true;
+  }
+  return Changed;
+}
+
+// LLVM 7 moved the memory intrinsics' alignment into parameter attributes;
+// LLVM 5 requires the explicit i32 align argument, so rebuild declarations
+// and calls with it (conservatively the minimum of the pointer alignments).
+static bool addMemIntrinsicAlignArg(Module &M) {
+  bool Changed = false;
+  for (Function &F : llvm::make_early_inc_range(M)) {
+    Intrinsic::ID ID = F.getIntrinsicID();
+    if (ID != Intrinsic::memcpy && ID != Intrinsic::memmove &&
+        ID != Intrinsic::memset)
+      continue;
+    auto *FTy = F.getFunctionType();
+    if (FTy->getNumParams() != 4)
+      continue;
+
+    Type *I32Ty = Type::getInt32Ty(M.getContext());
+    SmallVector<Type *, 5> Params(FTy->params().begin(), FTy->params().end());
+    Params.insert(Params.begin() + 3, I32Ty);
+    auto *NewFTy =
+        FunctionType::get(FTy->getReturnType(), Params, /*isVarArg=*/false);
+    std::string Name = F.getName().str();
+    Function *NewF = Function::Create(NewFTy, F.getLinkage(), "", &M);
+
+    for (User *U : llvm::make_early_inc_range(F.users())) {
+      auto *CI = cast<CallInst>(U);
+      uint64_t Align = CI->getParamAlign(0).valueOrOne().value();
+      if (ID != Intrinsic::memset)
+        Align = std::min(Align,
+                         CI->getParamAlign(1).valueOrOne().value());
+      SmallVector<Value *, 5> Args(CI->arg_begin(), CI->arg_end());
+      Args.insert(Args.begin() + 3, ConstantInt::get(I32Ty, Align));
+      auto *NewCI = CallInst::Create(NewFTy, NewF, Args, "", CI->getIterator());
+      NewCI->setDebugLoc(CI->getDebugLoc());
+      CI->eraseFromParent();
+    }
+
+    F.eraseFromParent();
+    NewF->setName(Name);
+    Changed = true;
+  }
+  return Changed;
+}
+
+bool PointerRewriter::prepareIntrinsics(Module &M, unsigned TargetMajor) {
+  bool Changed = dropLifetimeIntrinsics(M);
+  if (TargetMajor < 7)
+    Changed |= addMemIntrinsicAlignArg(M);
+  for (Function &F : M) {
+    if (!F.isIntrinsic())
+      continue;
+    std::string Name = legacyIntrinsicName(F, TargetMajor);
+    if (!Name.empty() && F.getName() != Name) {
+      F.setName(Name);
+      Changed = true;
+    }
+  }
+  return Changed;
+}
+
+void PointerRewriter::checkIntrinsics(Module &M) {
+  for (const Function &F : M) {
+    if (!F.isIntrinsic() || F.use_empty())
+      continue;
+    auto *FTy = F.getFunctionType();
+    bool HasPtr = FTy->getReturnType()->isPtrOrPtrVectorTy();
+    for (Type *P : FTy->params())
+      HasPtr |= P->isPtrOrPtrVectorTy();
+    if (!HasPtr)
+      continue;
+    // Intrinsics with a known typed signature are fine; anything else would
+    // be emitted with {}*-typed pointers against the old typed signature.
+    if (getTypedFunctionType(&F) != FTy)
+      continue;
+    report_fatal_error(Twine("intrinsic with pointer arguments cannot be "
+                             "downgraded: ") +
+                           F.getName(),
+                       false);
+  }
 }
 
 // bitcast instruction uses of blockaddress constants, which are emitted with

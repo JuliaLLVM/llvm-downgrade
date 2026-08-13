@@ -22,29 +22,6 @@
 #include "llvm/IR/Module.h"
 using namespace llvm;
 
-// LLVM 19 made va_start/va_end/va_copy take an explicit pointer type, mangling
-// their names with a pointer suffix (e.g. llvm.va_start.p0). LLVM 14 (and the
-// AIR loader) only know the unmangled names; rename them back.
-static bool renameVarargIntrinsics(Module &M) {
-  bool Changed = false;
-  for (Function &F : M) {
-    if (!F.isIntrinsic())
-      continue;
-    StringRef Name;
-    switch (F.getIntrinsicID()) {
-    case Intrinsic::vastart: Name = "llvm.va_start"; break;
-    case Intrinsic::vaend:   Name = "llvm.va_end";   break;
-    case Intrinsic::vacopy:  Name = "llvm.va_copy";  break;
-    default: continue;
-    }
-    if (F.getName() != Name) {
-      F.setName(Name);
-      Changed = true;
-    }
-  }
-  return Changed;
-}
-
 // Remove attributes whose representation postdates LLVM 14 and has no LLVM 14
 // encoding: the `range`/`initializes` ConstantRange(-list) attributes (LLVM
 // 18/19) and `captures` (LLVM 21). These are neither enum, int, string nor type
@@ -82,7 +59,8 @@ bool BitcodeWriter140::prepareModule(Module &M) {
         CB->setAttributes(stripUnsupportedAttrs(C, CB->getAttributes(), Changed));
   }
 
-  Changed |= renameVarargIntrinsics(M);
+  // Lower intrinsics to their legacy (LLVM 14) names and signatures.
+  Changed |= PointerRewriter::prepareIntrinsics(M, 14);
 
   // Lower opaque pointers to typed ones, which the AIR loader requires.
   PointerRewriter PR(M);
