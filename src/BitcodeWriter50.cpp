@@ -1226,7 +1226,10 @@ void ModuleBitcodeWriter50::writeModuleInfo() {
   };
   for (const GlobalVariable &GV : M.globals()) {
     UpdateMaxAlignment(GV.getAlign());
-    MaxGlobalType = std::max(MaxGlobalType, VE.getTypeID(GV.getValueType()));
+    Type *GVTy = GV.getValueType();
+    if (auto Ty = PointerMap.lookup(&GV))
+      GVTy = Ty->getElementType();
+    MaxGlobalType = std::max(MaxGlobalType, VE.getTypeID(GVTy));
     if (GV.hasSection()) {
       // Give section names unique ID's.
       unsigned &Entry = SectionMap[std::string(GV.getSection())];
@@ -1325,7 +1328,13 @@ void ModuleBitcodeWriter50::writeModuleInfo() {
     //             comdat, attributes]
     Vals.push_back(addToStrtab(GV.getName()));
     Vals.push_back(GV.getName().size());
-    Vals.push_back(VE.getTypeID(GV.getValueType()));
+    // Pointer-valued globals are emitted with the value type derived from
+    // their initializer (see typedGlobalValueType), so the initializer's
+    // typed pointer type matches.
+    Type *GVValTy = GV.getValueType();
+    if (auto Ty = PointerMap.lookup(&GV))
+      GVValTy = Ty->getElementType();
+    Vals.push_back(VE.getTypeID(GVValTy));
     Vals.push_back(GV.getType()->getAddressSpace() << 2 | 2 | GV.isConstant());
     Vals.push_back(GV.isDeclaration() ? 0 :
                    (VE.getValueID(GV.getInitializer()) + 1));
@@ -1399,7 +1408,10 @@ void ModuleBitcodeWriter50::writeModuleInfo() {
     //         visibility, dllstorageclass, threadlocal, unnamed_addr]
     Vals.push_back(addToStrtab(A.getName()));
     Vals.push_back(A.getName().size());
-    Vals.push_back(VE.getTypeID(A.getValueType()));
+    Type *AValTy = A.getValueType();
+    if (auto Ty = PointerMap.lookup(&A))
+      AValTy = Ty->getElementType();
+    Vals.push_back(VE.getTypeID(AValTy));
     Vals.push_back(A.getType()->getAddressSpace());
     Vals.push_back(VE.getValueID(A.getAliasee()));
     Vals.push_back(getEncodedLinkage(A));
@@ -2362,9 +2374,14 @@ void ModuleBitcodeWriter50::writeConstants(unsigned FirstVal, unsigned LastVal,
   Type *LastTy = nullptr;
   for (unsigned i = FirstVal; i != LastVal; ++i) {
     const Value *V = Vals[i].first;
-    // If we need to switch types, do so now.
-    if (V->getType() != LastTy) {
-      LastTy = V->getType();
+    // If we need to switch types, do so now. Inline asm and blockaddress
+    // constants carry a typed pointer type (pointer-to-function / i8*) in the
+    // PointerMap; the legacy readers derive their type from this record.
+    Type *VTy = V->getType();
+    if (auto MappedTy = PointerMap.lookup(V))
+      VTy = MappedTy;
+    if (VTy != LastTy) {
+      LastTy = VTy;
       Record.push_back(VE.getTypeID(LastTy));
       Stream.EmitRecord(bitc::CST_CODE_SETTYPE, Record,
                         CONSTANTS_SETTYPE_ABBREV);
@@ -2372,6 +2389,9 @@ void ModuleBitcodeWriter50::writeConstants(unsigned FirstVal, unsigned LastVal,
     }
 
     if (const InlineAsm *IA = dyn_cast<InlineAsm>(V)) {
+      // the legacy record has no unwind bit; dropping it would be unsound
+      if (IA->canThrow())
+        report_fatal_error("unwinding inline asm is not supported with LLVM 5.0", false);
       Record.push_back(unsigned(IA->hasSideEffects()) |
                        unsigned(IA->isAlignStack()) << 1 |
                        unsigned(IA->getDialect()&1) << 2);
@@ -2555,7 +2575,14 @@ void ModuleBitcodeWriter50::writeConstants(unsigned FirstVal, unsigned LastVal,
       }
     } else if (const BlockAddress *BA = dyn_cast<BlockAddress>(C)) {
       Code = bitc::CST_CODE_BLOCKADDRESS;
-      Record.push_back(VE.getTypeID(BA->getFunction()->getType()));
+      // The record must name the function's emitted (typed) pointer type;
+      // the reader type-checks it against the already-resolved function.
+      {
+        Type *FnPtrTy = BA->getFunction()->getType();
+        if (auto MappedTy = PointerMap.lookup(BA->getFunction()))
+          FnPtrTy = MappedTy;
+        Record.push_back(VE.getTypeID(FnPtrTy));
+      }
       Record.push_back(VE.getValueID(BA->getFunction()));
       Record.push_back(VE.getGlobalBasicBlockID(BA->getBasicBlock()));
     } else {
