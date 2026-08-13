@@ -42,6 +42,12 @@ file(GLOB WRITER_SRCS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
 if(EXISTS ${CMAKE_SOURCE_DIR}/src/BitcodeWriter140.cpp)
   add_compile_definitions(LLVMDG_HAS_140)
 endif()
+if(EXISTS ${CMAKE_SOURCE_DIR}/src/BitcodeWriter150.cpp)
+  add_compile_definitions(LLVMDG_HAS_150)
+endif()
+if(EXISTS ${CMAKE_SOURCE_DIR}/src/BitcodeWriter180.cpp)
+  add_compile_definitions(LLVMDG_HAS_180)
+endif()
 
 add_executable(llvm-downgrade
   tools/llvm-downgrade.cpp

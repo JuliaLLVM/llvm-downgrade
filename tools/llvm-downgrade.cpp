@@ -8,7 +8,7 @@
 // The input is bitcode (textual .ll is also accepted for convenience); it is
 // auto-upgraded to the host LLVM on load, so bitcode from any LLVM the host can
 // read is accepted. The output is always bitcode in the requested legacy format
-// (5.0, 7.0, or -- when built against host LLVM >= 15 -- 14.0).
+// (5.0, 7.0, 14.0, 15.0 or 18.0).
 //
 //===----------------------------------------------------------------------===//
 
@@ -38,6 +38,12 @@ static cl::opt<std::string>
                    cl::desc("Target bitcode version: 5.0, 7.0"
 #ifdef LLVMDG_HAS_140
                             ", 14.0"
+#endif
+#ifdef LLVMDG_HAS_150
+                            ", 15.0"
+#endif
+#ifdef LLVMDG_HAS_180
+                            ", 18.0"
 #endif
                             ),
                    cl::value_desc("version"), cl::Required);
@@ -73,6 +79,16 @@ int main(int argc, char **argv) {
   } else if (V == "14.0") {
     BitcodeWriter140::prepareModule(*M);
     WriteBitcode140ToFile(*M, Out.os());
+#endif
+#ifdef LLVMDG_HAS_150
+  } else if (V == "15.0") {
+    BitcodeWriter150::prepareModule(*M);
+    WriteBitcode150ToFile(*M, Out.os());
+#endif
+#ifdef LLVMDG_HAS_180
+  } else if (V == "18.0") {
+    BitcodeWriter180::prepareModule(*M);
+    WriteBitcode180ToFile(*M, Out.os());
 #endif
   } else {
     errs() << argv[0] << ": unsupported bitcode version '" << V << "'\n";
