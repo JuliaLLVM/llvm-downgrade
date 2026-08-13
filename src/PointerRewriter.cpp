@@ -293,9 +293,9 @@ static void prependBitcast(Module &M, Instruction *I, int Idx) {
   if (auto *PHI = dyn_cast<PHINode>(I)) {
     // we can't insert before phis, so rewrite in the incoming block instead
     auto *BB = PHI->getIncomingBlock(Idx);
-    Cast->insertBefore(BB->getTerminator());
+    Cast->insertBefore(BB->getTerminator()->getIterator());
   } else {
-    Cast->insertBefore(I);
+    Cast->insertBefore(I->getIterator());
   }
 
   I->setOperand(Idx, Cast);
@@ -328,7 +328,7 @@ static void appendBitcast(Module &M, Instruction *I) {
 
   // Insert no-op bitcast
   Instruction *Cast = CastInst::Create(Instruction::BitCast, I, I->getType());
-  Cast->insertBefore(I->getNextNode());
+  Cast->insertBefore(I->getNextNode()->getIterator());
 
   I->replaceAllUsesWith(Cast);
   // HACK: undo the part of the RAUW which messed with our input argument
