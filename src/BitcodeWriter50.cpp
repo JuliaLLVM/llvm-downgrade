@@ -537,7 +537,14 @@ static unsigned getEncodedBinaryOpcode(unsigned Opcode) {
 
 static unsigned getEncodedRMWOperation(AtomicRMWInst::BinOp Op) {
   switch (Op) {
-  default: llvm_unreachable("Unknown RMW operation!");
+  default:
+    // Operations introduced after this format (fadd/fsub in LLVM 9, fmax/fmin
+    // in 15, uinc/udec_wrap in 16, usub_cond/usub_sat in 20) have no encoding
+    // the legacy reader accepts; fail loudly instead of emitting garbage.
+    report_fatal_error(Twine("unsupported atomicrmw operation for the "
+                             "requested bitcode version: ") +
+                           AtomicRMWInst::getOperationName(Op),
+                       false);
   case AtomicRMWInst::Xchg: return bitc::RMW_XCHG;
   case AtomicRMWInst::Add: return bitc::RMW_ADD;
   case AtomicRMWInst::Sub: return bitc::RMW_SUB;
@@ -3026,15 +3033,15 @@ void ModuleBitcodeWriter50::writeInstruction(const Instruction &I,
     Vals.push_back(VE.getTypeID(I.getType())); // restype.
     break;
   case Instruction::Freeze: {
-    llvm_unreachable("can not encode freeze instruction for LLVM 5.0");
+    report_fatal_error("cannot encode freeze instruction for LLVM 5.0", false);
     break;
   }
   case Instruction::FNeg: {
-    llvm_unreachable("can not encode fneg instruction for LLVM 5.0");
+    report_fatal_error("cannot encode fneg instruction for LLVM 5.0", false);
     break;
   }
   case Instruction::CallBr:
-    llvm_unreachable("can not encode CallBr instruction for LLVM 5.0");
+    report_fatal_error("cannot encode CallBr instruction for LLVM 5.0", false);
     break;
   }
 

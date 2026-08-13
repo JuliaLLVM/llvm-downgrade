@@ -578,7 +578,14 @@ static unsigned getEncodedBinaryOpcode(unsigned Opcode) {
 
 static unsigned getEncodedRMWOperation(AtomicRMWInst::BinOp Op) {
   switch (Op) {
-  default: llvm_unreachable("Unknown RMW operation!");
+  default:
+    // Operations introduced after LLVM 14 (fmax/fmin in 15, uinc/udec_wrap in
+    // 16, usub_cond/usub_sat in 20) have no encoding its reader accepts; fail
+    // loudly instead of emitting garbage.
+    report_fatal_error(Twine("unsupported atomicrmw operation for the "
+                             "requested bitcode version: ") +
+                           AtomicRMWInst::getOperationName(Op),
+                       false);
   case AtomicRMWInst::Xchg: return bitc::RMW_XCHG;
   case AtomicRMWInst::Add: return bitc::RMW_ADD;
   case AtomicRMWInst::Sub: return bitc::RMW_SUB;
@@ -3145,6 +3152,12 @@ void ModuleBitcodeWriter140::writeInstruction(const Instruction &I,
     const CallBrInst *CBI = cast<CallBrInst>(&I);
     const Value *Callee = CBI->getCalledOperand();
     FunctionType *FTy = CBI->getFunctionType();
+
+    // LLVM 17 dropped the requirement that callbr asm lists its indirect
+    // destinations as blockaddress arguments with an "!i" constraint; modern
+    // callbr therefore cannot be round-tripped into a form LLVM 14's verifier
+    // accepts ("Indirect label missing from arglist").
+    report_fatal_error("cannot encode CallBr instruction for LLVM 14", false);
 
     if (CBI->hasOperandBundles())
       writeOperandBundles(*CBI, InstID);
