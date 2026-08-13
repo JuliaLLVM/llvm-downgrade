@@ -1600,7 +1600,7 @@ void ModuleBitcodeWriter70::writeDISubrange(const DISubrange *N,
   const auto LBMD = dyn_cast_or_null<ConstantAsMetadata>(N->getRawLowerBound());
   if (LBMD) {
     const auto LB = cast<ConstantInt>(LBMD->getValue());
-    Record.push_back(rotateSign(LB->getZExtValue()));
+    Record.push_back(rotateSign(LB->getSExtValue()));
   } else {
     Record.push_back(uint64_t(0));
   }
@@ -1616,25 +1616,17 @@ static void emitSignedInt64(SmallVectorImpl<uint64_t> &Vals, uint64_t V) {
     Vals.push_back((-V << 1) | 1);
 }
 
-static void emitWideAPInt(SmallVectorImpl<uint64_t> &Vals, const APInt &A) {
-  // We have an arbitrary precision integer value to write whose
-  // bit width is > 64. However, in canonical unsigned integer
-  // format it is likely that the high bits are going to be zero.
-  // So, we only write the number of active words.
-  unsigned NumWords = A.getActiveWords();
-  const uint64_t *RawData = A.getRawData();
-  for (unsigned i = 0; i < NumWords; i++)
-    emitSignedInt64(Vals, RawData[i]);
-}
-
 void ModuleBitcodeWriter70::writeDIEnumerator(const DIEnumerator *N,
                                             SmallVectorImpl<uint64_t> &Record,
                                             unsigned Abbrev) {
-  const uint64_t IsBigInt = 1 << 2;
-  Record.push_back(IsBigInt | (N->isUnsigned() << 1) | N->isDistinct());
-  Record.push_back(N->getValue().getBitWidth());
+  // The wide-APInt enumerator encoding only exists from LLVM 9; the 7.0 reader
+  // requires exactly [isDistinct | isUnsigned << 1, rotateSign(value), name].
+  if (N->getValue().getSignificantBits() > 64)
+    report_fatal_error("DIEnumerator values wider than 64 bit are not "
+                       "supported with LLVM 7.0", false);
+  Record.push_back((N->isUnsigned() << 1) | N->isDistinct());
+  Record.push_back(rotateSign(N->getValue().getSExtValue()));
   Record.push_back(VE.getMetadataOrNullID(N->getRawName()));
-  emitWideAPInt(Record, N->getValue());
 
   Stream.EmitRecord(bitc::METADATA_ENUMERATOR, Record, Abbrev);
   Record.clear();

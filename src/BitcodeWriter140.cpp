@@ -1775,53 +1775,17 @@ void ModuleBitcodeWriter140::writeDIBasicType(const DIBasicType *N,
 void ModuleBitcodeWriter140::writeDIFixedPointType(
     const DIFixedPointType *N, SmallVectorImpl<uint64_t> &Record,
     unsigned Abbrev) {
-  const unsigned SizeIsMetadata = 0x2;
-  Record.push_back(SizeIsMetadata | (unsigned)N->isDistinct());
-  Record.push_back(N->getTag());
-  Record.push_back(VE.getMetadataOrNullID(N->getRawName()));
-  Record.push_back(VE.getMetadataOrNullID(N->getRawSizeInBits()));
-  Record.push_back(N->getAlignInBits());
-  Record.push_back(N->getEncoding());
-  Record.push_back(N->getFlags());
-  Record.push_back(N->getKind());
-  Record.push_back(N->getFactorRaw());
-
-  auto WriteWideInt = [&](const APInt &Value) {
-    // Write an encoded word that holds the number of active words and
-    // the number of bits.
-    uint64_t NumWords = Value.getActiveWords();
-    uint64_t Encoded = (NumWords << 32) | Value.getBitWidth();
-    Record.push_back(Encoded);
-    emitWideAPInt(Record, Value);
-  };
-
-  WriteWideInt(N->getNumeratorRaw());
-  WriteWideInt(N->getDenominatorRaw());
-
-  Stream.EmitRecord(bitc::METADATA_FIXED_POINT_TYPE, Record, Abbrev);
-  Record.clear();
+  // The METADATA_FIXED_POINT_TYPE record code postdates LLVM 14; its reader
+  // rejects it. Reject rather than emit invalid bitcode.
+  report_fatal_error("DIFixedPointType is not supported with LLVM 14", false);
 }
 
 void ModuleBitcodeWriter140::writeDISubrangeType(
     const DISubrangeType *N, SmallVectorImpl<uint64_t> &Record,
     unsigned Abbrev) {
-  const unsigned SizeIsMetadata = 0x2;
-  Record.push_back(SizeIsMetadata | (unsigned)N->isDistinct());
-  Record.push_back(VE.getMetadataOrNullID(N->getRawName()));
-  Record.push_back(VE.getMetadataOrNullID(N->getFile()));
-  Record.push_back(N->getLine());
-  Record.push_back(VE.getMetadataOrNullID(N->getScope()));
-  Record.push_back(VE.getMetadataOrNullID(N->getRawSizeInBits()));
-  Record.push_back(N->getAlignInBits());
-  Record.push_back(N->getFlags());
-  Record.push_back(VE.getMetadataOrNullID(N->getBaseType()));
-  Record.push_back(VE.getMetadataOrNullID(N->getRawLowerBound()));
-  Record.push_back(VE.getMetadataOrNullID(N->getRawUpperBound()));
-  Record.push_back(VE.getMetadataOrNullID(N->getRawStride()));
-  Record.push_back(VE.getMetadataOrNullID(N->getRawBias()));
-
-  Stream.EmitRecord(bitc::METADATA_SUBRANGE_TYPE, Record, Abbrev);
-  Record.clear();
+  // The METADATA_SUBRANGE_TYPE record code postdates LLVM 14; its reader
+  // rejects it. Reject rather than emit invalid bitcode.
+  report_fatal_error("DISubrangeType is not supported with LLVM 14", false);
 }
 
 void ModuleBitcodeWriter140::writeDIStringType(const DIStringType *N,
