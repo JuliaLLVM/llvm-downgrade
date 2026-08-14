@@ -29,7 +29,13 @@ include(AddLLVM)
 include_directories(BEFORE ${CMAKE_SOURCE_DIR}/include)
 include_directories(${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/common)
 include_directories(${LLVM_INCLUDE_DIRS})
-add_definitions(${LLVM_DEFINITIONS})
+# LLVMConfig.cmake provides LLVM_DEFINITIONS as one space-separated string. If
+# it is passed to add_definitions() whole and its first flag carries a value
+# (e.g. -D_GLIBCXX_USE_CXX11_ABI=1, as on mingw/musl where no -D_GNU_SOURCE
+# precedes it), CMake parses the remaining flags as part of that value and the
+# compiler gets -D_GLIBCXX_USE_CXX11_ABI="1 -D_FILE_OFFSET_BITS=64 ...".
+separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")
+add_definitions(${LLVM_DEFINITIONS_LIST})
 
 if(NOT LLVM_ENABLE_RTTI)
   add_compile_options(-fno-rtti)
