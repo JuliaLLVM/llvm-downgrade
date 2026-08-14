@@ -1008,6 +1008,12 @@ void ValueEnumerator50::incorporateFunction(const Function &F) {
       }
       if (auto *SVI = dyn_cast<ShuffleVectorInst>(&I))
         EnumerateValue(SVI->getShuffleMaskForBitcode());
+      // Modern LLVM no longer stores switch case values as instruction
+      // operands, so enumerate them explicitly.
+      if (auto *SI = dyn_cast<SwitchInst>(&I)) {
+        for (const auto &Case : SI->cases())
+          EnumerateValue(Case.getCaseValue());
+      }
     }
     BasicBlocks.push_back(&BB);
     ValueMap[&BB] = BasicBlocks.size();

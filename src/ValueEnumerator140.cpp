@@ -190,6 +190,12 @@ static OrderMap orderModule(const Module &M) {
             orderValue(Op, OM);
         if (auto *SVI = dyn_cast<ShuffleVectorInst>(&I))
           orderValue(SVI->getShuffleMaskForBitcode(), OM);
+        // Modern LLVM no longer stores switch case values as instruction
+        // operands, so order them explicitly.
+        if (auto *SI = dyn_cast<SwitchInst>(&I)) {
+          for (const auto &Case : SI->cases())
+            orderValue(Case.getCaseValue(), OM);
+        }
       }
     for (const BasicBlock &BB : F)
       for (const Instruction &I : BB)
@@ -1106,6 +1112,12 @@ void ValueEnumerator140::incorporateFunction(const Function &F) {
       }
       if (auto *SVI = dyn_cast<ShuffleVectorInst>(&I))
         EnumerateValue(SVI->getShuffleMaskForBitcode());
+      // Modern LLVM no longer stores switch case values as instruction
+      // operands, so enumerate them explicitly.
+      if (auto *SI = dyn_cast<SwitchInst>(&I)) {
+        for (const auto &Case : SI->cases())
+          EnumerateValue(Case.getCaseValue());
+      }
     }
     BasicBlocks.push_back(&BB);
     ValueMap[&BB] = BasicBlocks.size();
