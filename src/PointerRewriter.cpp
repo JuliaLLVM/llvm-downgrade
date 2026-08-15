@@ -53,6 +53,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/IntrinsicsAMDGPU.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
@@ -261,6 +262,25 @@ static FunctionType *getTypedFunctionType(const Function *F) {
           TypedPointerType::get(Type::getInt8Ty(Ctx),
                                 FTy->getReturnType()->getPointerAddressSpace()),
           {}, false);
+    case Intrinsic::amdgcn_implicitarg_ptr:
+    case Intrinsic::amdgcn_dispatch_ptr:
+    case Intrinsic::amdgcn_queue_ptr:
+    case Intrinsic::amdgcn_kernarg_segment_ptr:
+      // i8 addrspace(4)* @llvm.amdgcn.implicitarg.ptr() etc.; typed LLVM
+      // declares these AMDGPU pointer-returning intrinsics with an i8 pointee.
+      return FunctionType::get(
+          TypedPointerType::get(Type::getInt8Ty(Ctx),
+                                FTy->getReturnType()->getPointerAddressSpace()),
+          {}, false);
+    case Intrinsic::amdgcn_is_shared:
+    case Intrinsic::amdgcn_is_private:
+      // i1 @llvm.amdgcn.is.shared(i8* nocapture) etc.
+      return FunctionType::get(
+          Type::getInt1Ty(Ctx),
+          {TypedPointerType::get(
+              Type::getInt8Ty(Ctx),
+              FTy->getParamType(0)->getPointerAddressSpace())},
+          false);
     case Intrinsic::memcpy:
     case Intrinsic::memmove:
     case Intrinsic::memset: {
@@ -522,6 +542,12 @@ bool bitcastFunctionOperands(Module &M) {
 
           prependBitcast(M, CI, Idx);
         }
+        // A retyped return reads back with its typed pointer type; wrap the
+        // call's uses so operands the reader type-checks against their
+        // user's opaque type (phi incoming values) see the opaque type.
+        if (NewFTy->getReturnType() != FTy->getReturnType() &&
+            !CI->use_empty())
+          appendBitcast(M, CI);
       }
     }
   }
