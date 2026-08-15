@@ -2374,6 +2374,30 @@ void ModuleBitcodeWriter50::writeConstants(unsigned FirstVal, unsigned LastVal,
   Type *LastTy = nullptr;
   for (unsigned i = FirstVal; i != LastVal; ++i) {
     const Value *V = Vals[i].first;
+    // Slots reserved by the enumerator for aggregate pointer elements re-list
+    // an already-emitted global value or blockaddress; emit them as a bitcast
+    // from the value's typed pointer type to its opaque pointer type, which
+    // is the type the aggregate's element slots read back with.
+    if (VE.isAggregatePtrCastID(i)) {
+      TypedPointerType *SrcTy = PointerMap.lookup(V);
+      if (!SrcTy)
+        report_fatal_error("constant-aggregate pointer element without a "
+                           "typed pointer type", false);
+      if (V->getType() != LastTy) {
+        LastTy = V->getType();
+        Record.push_back(VE.getTypeID(LastTy));
+        Stream.EmitRecord(bitc::CST_CODE_SETTYPE, Record,
+                          CONSTANTS_SETTYPE_ABBREV);
+        Record.clear();
+      }
+      Record.push_back(getEncodedCastOpcode(Instruction::BitCast));
+      Record.push_back(VE.getTypeID(SrcTy));
+      Record.push_back(VE.getValueID(V));
+      Stream.EmitRecord(bitc::CST_CODE_CE_CAST, Record,
+                        CONSTANTS_CE_CAST_Abbrev);
+      Record.clear();
+      continue;
+    }
     // If we need to switch types, do so now. Inline asm and blockaddress
     // constants carry a typed pointer type (pointer-to-function / i8*) in the
     // PointerMap; the legacy readers derive their type from this record.
@@ -2494,12 +2518,26 @@ void ModuleBitcodeWriter50::writeConstants(unsigned FirstVal, unsigned LastVal,
               CDS->getElementAsAPFloat(i).bitcastToAPInt().getLimitedValue());
       }
     } else if (isa<ConstantAggregate>(C)) {
-      if (PointerRewriter::requiresPointerRewriting(C))
-          report_fatal_error("pointers in constant aggregates are not yet supported by the IR downgrader", false);
-
       Code = bitc::CST_CODE_AGGREGATE;
-      for (const Value *Op : C->operands())
+      for (const Value *Op : C->operands()) {
+        // Pointer-typed global values and blockaddresses are emitted with
+        // their typed pointer type, but this aggregate's element slots read
+        // back with the opaque pointer type; refer to the synthetic bitcast
+        // reserved by the enumerator instead of the value itself. Other
+        // pointer-carrying constants have no such bridge: nested aggregates
+        // recurse through this path and constant expressions are rejected
+        // when their own record is written, but anything else (e.g. no_cfi
+        // or dso_local_equivalent) is rejected here.
+        if (unsigned CastID = VE.getAggregatePtrCastID(Op)) {
+          Record.push_back(CastID);
+          continue;
+        }
+        if (!isa<ConstantAggregate, ConstantExpr>(Op) &&
+            PointerRewriter::requiresPointerRewriting(cast<Constant>(Op)))
+          report_fatal_error("pointers in constant aggregates are not "
+                             "supported by the IR downgrader", false);
         Record.push_back(VE.getValueID(Op));
+      }
       AbbrevToUse = AggregateAbbrev;
     } else if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(C)) {
       if (PointerRewriter::requiresPointerRewriting(C))

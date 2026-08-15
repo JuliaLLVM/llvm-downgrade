@@ -64,6 +64,17 @@ private:
   ValueMapType ValueMap;
   ValueList Values;
 
+  /// Constant slots reserved after all other module-level constants for the
+  /// synthetic bitcasts bridging pointer-typed global values (and
+  /// blockaddresses) referenced by constant aggregates: an aggregate's
+  /// element slots read back with the opaque pointer type, while the
+  /// referenced value is emitted with its typed pointer type. Maps each such
+  /// value to the value ID of its reserved slot; the writer emits a
+  /// CST_CODE_CE_CAST record there.
+  ValueMapType AggregatePtrCastMap;
+  unsigned FirstAggregatePtrCastID = 0;
+  unsigned EndAggregatePtrCastID = 0;
+
   using ComdatSetType = UniqueVector<const Comdat *>;
   ComdatSetType Comdats;
 
@@ -152,6 +163,22 @@ public:
              const char *Name) const;
 
   unsigned getValueID(const Value *V) const;
+
+  /// The value ID of the slot reserved for the synthetic bitcast of \p V (a
+  /// pointer-typed global value or blockaddress referenced by a constant
+  /// aggregate), or 0 if no slot was reserved. 0 is unambiguous: a reserved
+  /// slot always follows at least the referenced global value itself, so its
+  /// ID is never 0.
+  unsigned getAggregatePtrCastID(const Value *V) const {
+    return AggregatePtrCastMap.lookup(V);
+  }
+
+  /// True if value ID \p ID is a slot reserved for a synthetic aggregate
+  /// pointer cast (see getAggregatePtrCastID).
+  bool isAggregatePtrCastID(unsigned ID) const {
+    return ID >= FirstAggregatePtrCastID && ID < EndAggregatePtrCastID;
+  }
+
   unsigned getMetadataID(const Metadata *MD) const {
     auto ID = getMetadataOrNullID(MD);
     assert(ID != 0 && "Metadata not in slotcalculator!");

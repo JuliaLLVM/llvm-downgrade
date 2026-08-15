@@ -573,19 +573,38 @@ static TypedPointerType *blockAddressType(const BlockAddress *BA) {
                                BA->getType()->getPointerAddressSpace());
 }
 
+// visit every blockaddress reachable from C through constant operands
+// (stopping at global values, whose initializers are visited separately)
+static void
+visitBlockAddresses(const Constant *C, SmallPtrSetImpl<const Constant *> &Seen,
+                    function_ref<void(const BlockAddress *)> Fn) {
+  if (!Seen.insert(C).second || isa<GlobalValue>(C))
+    return;
+  if (const auto *BA = dyn_cast<BlockAddress>(C)) {
+    Fn(BA);
+    return;
+  }
+  for (const Value *Op : C->operands())
+    if (const auto *OpC = dyn_cast<Constant>(Op))
+      visitBlockAddresses(OpC, Seen, Fn);
+}
+
 // build a map of values to typed pointer types
 PointerTypeMap PointerRewriter::buildPointerMap(const Module &M) {
   PointerTypeMap PointerMap;
 
   // globals
+  SmallPtrSet<const Constant *, 8> BAVisited;
   for (const GlobalVariable &GV : M.globals()) {
     SmallPtrSet<const GlobalValue *, 4> Seen;
     unsigned AS = GV.getAddressSpace();
     PointerMap[&GV] =
         TypedPointerType::get(typedGlobalValueType(&GV, Seen), AS);
     if (GV.hasInitializer())
-      if (const auto *BA = dyn_cast<BlockAddress>(GV.getInitializer()))
-        PointerMap[BA] = blockAddressType(BA);
+      visitBlockAddresses(GV.getInitializer(), BAVisited,
+                          [&](const BlockAddress *BA) {
+                            PointerMap[BA] = blockAddressType(BA);
+                          });
   }
 
   // aliases and ifuncs
@@ -695,10 +714,14 @@ PointerRewriter::orderedPointerTypes(const Module &M,
     if (TypedPointerType *Ty = PointerMap.lookup(V))
       Order.push_back(Ty);
   };
+  SmallPtrSet<const Constant *, 8> BAVisited;
   for (const GlobalVariable &GV : M.globals()) {
     add(&GV);
-    if (GV.hasInitializer())
+    if (GV.hasInitializer()) {
       add(GV.getInitializer());
+      visitBlockAddresses(GV.getInitializer(), BAVisited,
+                          [&](const BlockAddress *BA) { add(BA); });
+    }
   }
   for (const GlobalAlias &GA : M.aliases())
     add(&GA);
