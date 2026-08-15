@@ -71,6 +71,9 @@ bool BitcodeWriter70::prepareModule(Module &M) {
   // Lower intrinsics to their legacy names/signatures, and reject any
   // pointer-typed intrinsic we cannot reconstruct a typed signature for.
   Changed |= PointerRewriter::prepareIntrinsics(M, 7);
+
+  // Downgrade module flags whose behavior postdates LLVM 7.
+  Changed |= PointerRewriter::downgradeModuleFlags(M);
   PointerRewriter::checkIntrinsics(M);
 
   PointerRewriter PR(M);

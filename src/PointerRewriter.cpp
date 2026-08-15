@@ -54,6 +54,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/ReplaceConstant.h"
 #include "llvm/IR/TypedPointerType.h"
@@ -860,6 +861,40 @@ bool PointerRewriter::prepareIntrinsics(Module &M, unsigned TargetMajor) {
       F.setName(Name);
       Changed = true;
     }
+  }
+  return Changed;
+}
+
+bool PointerRewriter::downgradeModuleFlags(Module &M) {
+  NamedMDNode *ModFlags = M.getModuleFlagsMetadata();
+  if (!ModFlags)
+    return false;
+  bool Changed = false;
+  for (unsigned i = 0, e = ModFlags->getNumOperands(); i != e; ++i) {
+    MDNode *Flag = ModFlags->getOperand(i);
+    if (Flag->getNumOperands() < 3)
+      continue;
+    auto *Behavior =
+        mdconst::dyn_extract_or_null<ConstantInt>(Flag->getOperand(0));
+    if (!Behavior || Behavior->getZExtValue() <= Module::Max)
+      continue;
+    auto *ID = dyn_cast<MDString>(Flag->getOperand(1));
+    if (Behavior->getZExtValue() == Module::Min && ID &&
+        ID->getString() == "PIC Level") {
+      // Clang emitted "PIC Level" with the Max behavior before LLVM 15
+      // introduced Min; rewriting restores the flag's legacy spelling.
+      Metadata *Ops[3] = {
+          ConstantAsMetadata::get(ConstantInt::get(
+              Type::getInt32Ty(M.getContext()), Module::Max)),
+          Flag->getOperand(1), Flag->getOperand(2)};
+      ModFlags->setOperand(i, MDNode::get(M.getContext(), Ops));
+      Changed = true;
+      continue;
+    }
+    report_fatal_error(Twine("module flag with a behavior the target LLVM "
+                             "cannot represent: ") +
+                           (ID ? ID->getString() : "<unnamed>"),
+                       false);
   }
   return Changed;
 }

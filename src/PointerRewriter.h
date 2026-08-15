@@ -48,6 +48,12 @@ public:
   // the 5.0/7.0 targets.
   static void checkIntrinsics(Module &M);
 
+  // Downgrade llvm.module.flags whose behavior postdates the typed targets:
+  // the Min behavior (LLVM 15) on the "PIC Level" flag becomes Max, the
+  // behavior clang emitted for that flag before LLVM 15. Any other flag with
+  // a behavior newer than Max aborts.
+  static bool downgradeModuleFlags(Module &M);
+
   // Return the typed pointer types in `PointerMap` in a deterministic module
   // order. Iterating the DenseMap directly orders types by `Value *` address,
   // which makes the emitted type table — and thus the whole bitcode — depend on
