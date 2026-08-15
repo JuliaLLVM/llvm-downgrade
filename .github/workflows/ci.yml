@@ -106,3 +106,55 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  integration:
+    name: ROCm device libraries
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 22
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
+          sudo apt-get install -y llvm-22-dev llvm-22-tools ninja-build
+
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+
+      - uses: julia-actions/cache@v2
+
+      - name: Fetch legacy LLVM binaries (LLVM_full_jll)
+        run: |
+          for spec in 14:14.0.6 15:15.0.7 18:18.1.7; do
+            MAJOR="${spec%%:*}" VERSION="${spec#*:}" julia -e '
+              using Pkg
+              Pkg.activate(; temp=true)
+              Pkg.add(name="LLVM_full_jll", version=ENV["VERSION"])
+              using LLVM_full_jll
+              open(ENV["GITHUB_ENV"], "a") do io
+                  println(io, "DIS_", ENV["MAJOR"], "=",
+                          joinpath(LLVM_full_jll.artifact_dir, "tools", "llvm-dis"))
+                  println(io, "OPT_", ENV["MAJOR"], "=",
+                          joinpath(LLVM_full_jll.artifact_dir, "tools", "opt"))
+              end'
+          done
+
+      - name: Configure
+        run: |
+          cmake -B build -S . -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR=/usr/lib/llvm-22/lib/cmake/llvm \
+            -DLLVMDG_BUILD_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Downgrade the device libraries
+        run: |
+          julia --startup-file=no test/integration/downgrade_devicelibs.jl \
+            --tool build/llvm-downgrade \
+            --dis-14 "$DIS_14" --opt-14 "$OPT_14" \
+            --dis-15 "$DIS_15" --opt-15 "$OPT_15" \
+            --dis-18 "$DIS_18" --opt-18 "$OPT_18"
