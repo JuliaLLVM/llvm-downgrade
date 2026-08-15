@@ -320,7 +320,7 @@ static FunctionType *getTypedFunctionType(const Function *F) {
   // Parameters carrying a pointee-type attribute must be emitted with that
   // pointee: legacy byval/sret/inalloca take their type from the parameter's
   // pointer element type, and the LLVM 14 verifier requires the typed
-  // attribute payload to match it.
+  // attribute payload (including byref's) to match it.
   AttributeList AL = F->getAttributes();
   for (unsigned i = 0; i < FTy->getNumParams(); i++) {
     if (!isa<PointerType>(Args[i]))
@@ -331,6 +331,8 @@ static FunctionType *getTypedFunctionType(const Function *F) {
       ElTy = PA.getStructRetType();
     if (!ElTy)
       ElTy = PA.getInAllocaType();
+    if (!ElTy)
+      ElTy = PA.getByRefType();
     if (!ElTy)
       continue;
     Args[i] = TypedPointerType::get(
