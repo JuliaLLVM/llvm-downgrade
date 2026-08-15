@@ -82,9 +82,9 @@ The official release tarballs from releases.llvm.org provide suitable
 
 `test/integration/downgrade_devicelibs.jl` is a Julia integration test that
 fetches the ROCm device libraries shipped by the latest
-`AMDGPU_LLVM_Backend_jll` and downgrades all of them to the 14.0/15.0/18.0
-formats, checking each result with legacy `llvm-dis`/`opt` binaries. CI runs
-it on every push; see `.github/workflows/ci.yml` for the invocation.
+`AMDGPU_LLVM_Backend_jll` and downgrades all of them to the LLVM versions we
+care about (14, 15, and 18). See `.github/workflows/ci.yml` for how to invoke
+it.
 
 ## Limitations
 

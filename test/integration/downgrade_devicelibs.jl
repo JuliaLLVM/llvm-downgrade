@@ -1,17 +1,6 @@
-# Downgrade the ROCm device libraries shipped by the latest
-# AMDGPU_LLVM_Backend_jll and check the results with the legacy LLVM binaries
-# the build was configured with: llvm-dis proves a real old LLVM reads each
-# module, opt runs its full IR verifier. The 5.0/7.0 targets are not
-# exercised because LLVM 7 and older cannot parse the AMDGPU datalayout
-# string, which the downgrader passes through unmodified.
-#
-# Exits 77 (the test suite's skip code) when the package cannot be fetched,
-# e.g. without network access.
-#
-# Usage (CI runs this on every push, see .github/workflows/ci.yml; flags
-# mirror run-downgrade-test.sh, and empty values are ignored):
-#   julia downgrade_devicelibs.jl --tool <llvm-downgrade> \
-#       [--dis-14 <llvm-dis>] [--opt-14 <opt>] [--dis-15 ...] ...
+# Test that we can successfully downgrade the ROCm device libraries shipped by
+# the latest AMDGPU_LLVM_Backend_jll to the LLVM versions we care about (14, 15,
+# and 18)
 
 using Test, Pkg
 
