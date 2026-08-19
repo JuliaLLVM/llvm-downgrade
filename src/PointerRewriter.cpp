@@ -53,7 +53,9 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/IntrinsicsAMDGPU.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/ReplaceConstant.h"
 #include "llvm/IR/TypedPointerType.h"
@@ -260,6 +262,25 @@ static FunctionType *getTypedFunctionType(const Function *F) {
           TypedPointerType::get(Type::getInt8Ty(Ctx),
                                 FTy->getReturnType()->getPointerAddressSpace()),
           {}, false);
+    case Intrinsic::amdgcn_implicitarg_ptr:
+    case Intrinsic::amdgcn_dispatch_ptr:
+    case Intrinsic::amdgcn_queue_ptr:
+    case Intrinsic::amdgcn_kernarg_segment_ptr:
+      // i8 addrspace(4)* @llvm.amdgcn.implicitarg.ptr() etc.; typed LLVM
+      // declares these AMDGPU pointer-returning intrinsics with an i8 pointee.
+      return FunctionType::get(
+          TypedPointerType::get(Type::getInt8Ty(Ctx),
+                                FTy->getReturnType()->getPointerAddressSpace()),
+          {}, false);
+    case Intrinsic::amdgcn_is_shared:
+    case Intrinsic::amdgcn_is_private:
+      // i1 @llvm.amdgcn.is.shared(i8* nocapture) etc.
+      return FunctionType::get(
+          Type::getInt1Ty(Ctx),
+          {TypedPointerType::get(
+              Type::getInt8Ty(Ctx),
+              FTy->getParamType(0)->getPointerAddressSpace())},
+          false);
     case Intrinsic::memcpy:
     case Intrinsic::memmove:
     case Intrinsic::memset: {
@@ -299,7 +320,7 @@ static FunctionType *getTypedFunctionType(const Function *F) {
   // Parameters carrying a pointee-type attribute must be emitted with that
   // pointee: legacy byval/sret/inalloca take their type from the parameter's
   // pointer element type, and the LLVM 14 verifier requires the typed
-  // attribute payload to match it.
+  // attribute payload (including byref's) to match it.
   AttributeList AL = F->getAttributes();
   for (unsigned i = 0; i < FTy->getNumParams(); i++) {
     if (!isa<PointerType>(Args[i]))
@@ -310,6 +331,8 @@ static FunctionType *getTypedFunctionType(const Function *F) {
       ElTy = PA.getStructRetType();
     if (!ElTy)
       ElTy = PA.getInAllocaType();
+    if (!ElTy)
+      ElTy = PA.getByRefType();
     if (!ElTy)
       continue;
     Args[i] = TypedPointerType::get(
@@ -521,6 +544,12 @@ bool bitcastFunctionOperands(Module &M) {
 
           prependBitcast(M, CI, Idx);
         }
+        // A retyped return reads back with its typed pointer type; wrap the
+        // call's uses so operands the reader type-checks against their
+        // user's opaque type (phi incoming values) see the opaque type.
+        if (NewFTy->getReturnType() != FTy->getReturnType() &&
+            !CI->use_empty())
+          appendBitcast(M, CI);
       }
     }
   }
@@ -573,19 +602,38 @@ static TypedPointerType *blockAddressType(const BlockAddress *BA) {
                                BA->getType()->getPointerAddressSpace());
 }
 
+// visit every blockaddress reachable from C through constant operands
+// (stopping at global values, whose initializers are visited separately)
+static void
+visitBlockAddresses(const Constant *C, SmallPtrSetImpl<const Constant *> &Seen,
+                    function_ref<void(const BlockAddress *)> Fn) {
+  if (!Seen.insert(C).second || isa<GlobalValue>(C))
+    return;
+  if (const auto *BA = dyn_cast<BlockAddress>(C)) {
+    Fn(BA);
+    return;
+  }
+  for (const Value *Op : C->operands())
+    if (const auto *OpC = dyn_cast<Constant>(Op))
+      visitBlockAddresses(OpC, Seen, Fn);
+}
+
 // build a map of values to typed pointer types
 PointerTypeMap PointerRewriter::buildPointerMap(const Module &M) {
   PointerTypeMap PointerMap;
 
   // globals
+  SmallPtrSet<const Constant *, 8> BAVisited;
   for (const GlobalVariable &GV : M.globals()) {
     SmallPtrSet<const GlobalValue *, 4> Seen;
     unsigned AS = GV.getAddressSpace();
     PointerMap[&GV] =
         TypedPointerType::get(typedGlobalValueType(&GV, Seen), AS);
     if (GV.hasInitializer())
-      if (const auto *BA = dyn_cast<BlockAddress>(GV.getInitializer()))
-        PointerMap[BA] = blockAddressType(BA);
+      visitBlockAddresses(GV.getInitializer(), BAVisited,
+                          [&](const BlockAddress *BA) {
+                            PointerMap[BA] = blockAddressType(BA);
+                          });
   }
 
   // aliases and ifuncs
@@ -695,10 +743,14 @@ PointerRewriter::orderedPointerTypes(const Module &M,
     if (TypedPointerType *Ty = PointerMap.lookup(V))
       Order.push_back(Ty);
   };
+  SmallPtrSet<const Constant *, 8> BAVisited;
   for (const GlobalVariable &GV : M.globals()) {
     add(&GV);
-    if (GV.hasInitializer())
+    if (GV.hasInitializer()) {
       add(GV.getInitializer());
+      visitBlockAddresses(GV.getInitializer(), BAVisited,
+                          [&](const BlockAddress *BA) { add(BA); });
+    }
   }
   for (const GlobalAlias &GA : M.aliases())
     add(&GA);
@@ -841,10 +893,63 @@ bool PointerRewriter::prepareIntrinsics(Module &M, unsigned TargetMajor) {
   return Changed;
 }
 
-void PointerRewriter::checkIntrinsics(Module &M) {
+bool PointerRewriter::downgradeModuleFlags(Module &M) {
+  NamedMDNode *ModFlags = M.getModuleFlagsMetadata();
+  if (!ModFlags)
+    return false;
+  bool Changed = false;
+  for (unsigned i = 0, e = ModFlags->getNumOperands(); i != e; ++i) {
+    MDNode *Flag = ModFlags->getOperand(i);
+    if (Flag->getNumOperands() < 3)
+      continue;
+    auto *Behavior =
+        mdconst::dyn_extract_or_null<ConstantInt>(Flag->getOperand(0));
+    if (!Behavior || Behavior->getZExtValue() <= Module::Max)
+      continue;
+    auto *ID = dyn_cast<MDString>(Flag->getOperand(1));
+    if (Behavior->getZExtValue() == Module::Min && ID &&
+        ID->getString() == "PIC Level") {
+      // Clang emitted "PIC Level" with the Max behavior before LLVM 15
+      // introduced Min; rewriting restores the flag's legacy spelling.
+      Metadata *Ops[3] = {
+          ConstantAsMetadata::get(ConstantInt::get(
+              Type::getInt32Ty(M.getContext()), Module::Max)),
+          Flag->getOperand(1), Flag->getOperand(2)};
+      ModFlags->setOperand(i, MDNode::get(M.getContext(), Ops));
+      Changed = true;
+      continue;
+    }
+    report_fatal_error(Twine("module flag with a behavior the target LLVM "
+                             "cannot represent: ") +
+                           (ID ? ID->getString() : "<unnamed>"),
+                       false);
+  }
+  return Changed;
+}
+
+void PointerRewriter::checkIntrinsics(Module &M, unsigned TargetMajor) {
   for (const Function &F : M) {
     if (!F.isIntrinsic() || F.use_empty())
       continue;
+    // Before LLVM 7 switched AMDGPU to its current address-space mapping,
+    // these intrinsics returned i8 addrspace(2)* rather than i8
+    // addrspace(4)*. A module using the current mapping cannot be renumbered
+    // locally, so downgrading it below 7.0 is rejected.
+    if (TargetMajor < 7) {
+      switch (F.getIntrinsicID()) {
+      default:
+        break;
+      case Intrinsic::amdgcn_implicitarg_ptr:
+      case Intrinsic::amdgcn_dispatch_ptr:
+      case Intrinsic::amdgcn_queue_ptr:
+      case Intrinsic::amdgcn_kernarg_segment_ptr:
+        report_fatal_error(Twine("AMDGPU intrinsic predates the LLVM 7 "
+                                 "address-space remapping and cannot be "
+                                 "downgraded: ") +
+                               F.getName(),
+                           false);
+      }
+    }
     auto *FTy = F.getFunctionType();
     bool HasPtr = FTy->getReturnType()->isPtrOrPtrVectorTy();
     for (Type *P : FTy->params())

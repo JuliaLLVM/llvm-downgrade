@@ -80,6 +80,12 @@ The official release tarballs from releases.llvm.org provide suitable
 `test/run-downgrade-test.sh` documents the per-test directives (`VERSIONS`,
 `MIN-LLVM`/`MAX-LLVM`, `XFAIL-AS`, `XFAIL-DIS-V*`) and the FileCheck prefixes.
 
+`test/integration/downgrade_devicelibs.jl` is a Julia integration test that
+fetches the ROCm device libraries shipped by the latest
+`AMDGPU_LLVM_Backend_jll` and downgrades all of them to the LLVM versions we
+care about (14, 15, and 18). See `.github/workflows/ci.yml` for how to invoke
+it.
+
 ## Limitations
 
 Constructs with no reasonable legacy representation are rejected with a fatal

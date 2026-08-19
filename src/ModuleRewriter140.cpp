@@ -62,6 +62,9 @@ bool BitcodeWriter140::prepareModule(Module &M) {
   // Lower intrinsics to their legacy (LLVM 14) names and signatures.
   Changed |= PointerRewriter::prepareIntrinsics(M, 14);
 
+  // Downgrade module flags whose behavior postdates LLVM 14.
+  Changed |= PointerRewriter::downgradeModuleFlags(M);
+
   // Lower opaque pointers to typed ones, which the AIR loader requires.
   PointerRewriter PR(M);
   Changed |= PR.run();

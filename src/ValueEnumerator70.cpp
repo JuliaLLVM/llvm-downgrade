@@ -432,6 +432,43 @@ ValueEnumerator70::ValueEnumerator70(const Module &M,
   // Optimize constant ordering.
   OptimizeConstants(FirstConstant, Values.size());
 
+  // Reserve constant slots for the synthetic bitcasts the writer emits for
+  // pointer-typed global values and blockaddresses referenced by constant
+  // aggregates: an aggregate's element slots read back with the opaque
+  // pointer type, but the referenced value itself is emitted with its typed
+  // pointer type, so each such element must go through a bitcast constant
+  // bridging the two. The slots sit after all other module-level constants,
+  // where they cannot disturb the IDs OptimizeConstants just assigned.
+  FirstAggregatePtrCastID = Values.size();
+  {
+    SmallPtrSet<const Constant *, 16> Visited;
+    SmallVector<const Constant *, 16> Worklist;
+    for (const GlobalVariable &GV : M.globals())
+      if (GV.hasInitializer())
+        Worklist.push_back(GV.getInitializer());
+    while (!Worklist.empty()) {
+      const Constant *C = Worklist.pop_back_val();
+      if (!Visited.insert(C).second || isa<GlobalValue>(C))
+        continue;
+      if (isa<ConstantAggregate>(C)) {
+        for (const Value *Op : C->operands()) {
+          if (Op->getType()->isPointerTy() &&
+              isa<GlobalValue, BlockAddress>(Op)) {
+            if (AggregatePtrCastMap.try_emplace(Op, Values.size()).second)
+              Values.push_back(std::make_pair(Op, 1U));
+          } else {
+            Worklist.push_back(cast<Constant>(Op));
+          }
+        }
+      } else {
+        for (const Value *Op : C->operands())
+          if (const auto *OpC = dyn_cast<Constant>(Op))
+            Worklist.push_back(OpC);
+      }
+    }
+  }
+  EndAggregatePtrCastID = Values.size();
+
   // Organize metadata ordering.
   organizeMetadata();
 }
