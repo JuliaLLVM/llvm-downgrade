@@ -44,9 +44,12 @@ public:
 
   // Abort on called intrinsics with pointer-typed parameters that have no
   // typed legacy signature: their {}*-typed arguments would be rejected by
-  // the legacy verifiers ("Intrinsic has incorrect argument type!"). Used by
-  // the 5.0/7.0 targets.
-  static void checkIntrinsics(Module &M);
+  // the legacy verifiers ("Intrinsic has incorrect argument type!"). Also
+  // abort on intrinsics whose typed signature differs in the target LLVM,
+  // like the AMDGPU pointer intrinsics before the LLVM 7 address-space
+  // remapping. Used by the 5.0/7.0 targets; TargetMajor is the LLVM major of
+  // the target bitcode format.
+  static void checkIntrinsics(Module &M, unsigned TargetMajor);
 
   // Downgrade llvm.module.flags whose behavior postdates the typed targets:
   // the Min behavior (LLVM 15) on the "PIC Level" flag becomes Max, the

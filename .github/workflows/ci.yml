@@ -23,11 +23,13 @@ jobs:
           - target: '7.0'
             dis_product: llvm_dis_7_path
             dis_option: LLVMDG_DIS_7_0
+          # LLVMDowngrader_jll only ships llvm-dis, so from 14.0 on (the oldest
+          # LLVM_full_jll is 8.0.1) use LLVM_full_jll, which also ships opt,
+          # letting the tests run the legacy verifier
           - target: '14.0'
-            dis_product: llvm_dis_14_path
+            llvm_full: '14.0.6'
             dis_option: LLVMDG_DIS_14_0
-          # LLVMDowngrader_jll does not ship llvm-dis-15/-18, so use LLVM_full_jll
-          # (which also ships opt, letting the tests run the legacy verifier)
+            opt_option: LLVMDG_OPT_14_0
           - target: '15.0'
             llvm_full: '15.0.7'
             dis_option: LLVMDG_DIS_15_0

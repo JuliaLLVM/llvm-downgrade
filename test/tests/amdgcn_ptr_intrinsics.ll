@@ -1,11 +1,13 @@
-; VERSIONS: 5.0 7.0 14.0
+; VERSIONS: 7.0 14.0
 ; MIN-LLVM: 15
 ; The AMDGPU pointer-typed intrinsics are declared with an i8 pointee in typed
 ; LLVM; without the known signature they would be emitted with {}* pointers
 ; and rejected by the legacy verifiers ("Intrinsic has incorrect return
 ; type!"). A retyped call result is also bridged back to the opaque type with
 ; a bitcast, so operands the reader type-checks against their user's type
-; (phi incoming values) still match.
+; (phi incoming values) still match. The i8 addrspace(4)* signature only
+; exists from LLVM 7 on; a 5.0 target aborts instead (see
+; unsupported_amdgcn_ptr_intrinsic_v5.ll).
 
 declare align 4 ptr addrspace(4) @llvm.amdgcn.implicitarg.ptr()
 declare align 4 ptr addrspace(4) @llvm.amdgcn.dispatch.ptr()

@@ -74,7 +74,7 @@ bool BitcodeWriter70::prepareModule(Module &M) {
 
   // Downgrade module flags whose behavior postdates LLVM 7.
   Changed |= PointerRewriter::downgradeModuleFlags(M);
-  PointerRewriter::checkIntrinsics(M);
+  PointerRewriter::checkIntrinsics(M, 7);
 
   PointerRewriter PR(M);
   Changed |= PR.run();

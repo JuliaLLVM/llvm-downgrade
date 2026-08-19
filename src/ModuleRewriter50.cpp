@@ -78,7 +78,7 @@ bool BitcodeWriter50::prepareModule(Module &M) {
 
   // Downgrade module flags whose behavior postdates LLVM 5.
   Changed |= PointerRewriter::downgradeModuleFlags(M);
-  PointerRewriter::checkIntrinsics(M);
+  PointerRewriter::checkIntrinsics(M, 5);
 
   PointerRewriter PR(M);
   Changed |= PR.run();

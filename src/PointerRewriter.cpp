@@ -927,10 +927,29 @@ bool PointerRewriter::downgradeModuleFlags(Module &M) {
   return Changed;
 }
 
-void PointerRewriter::checkIntrinsics(Module &M) {
+void PointerRewriter::checkIntrinsics(Module &M, unsigned TargetMajor) {
   for (const Function &F : M) {
     if (!F.isIntrinsic() || F.use_empty())
       continue;
+    // Before LLVM 7 switched AMDGPU to its current address-space mapping,
+    // these intrinsics returned i8 addrspace(2)* rather than i8
+    // addrspace(4)*. A module using the current mapping cannot be renumbered
+    // locally, so downgrading it below 7.0 is rejected.
+    if (TargetMajor < 7) {
+      switch (F.getIntrinsicID()) {
+      default:
+        break;
+      case Intrinsic::amdgcn_implicitarg_ptr:
+      case Intrinsic::amdgcn_dispatch_ptr:
+      case Intrinsic::amdgcn_queue_ptr:
+      case Intrinsic::amdgcn_kernarg_segment_ptr:
+        report_fatal_error(Twine("AMDGPU intrinsic predates the LLVM 7 "
+                                 "address-space remapping and cannot be "
+                                 "downgraded: ") +
+                               F.getName(),
+                           false);
+      }
+    }
     auto *FTy = F.getFunctionType();
     bool HasPtr = FTy->getReturnType()->isPtrOrPtrVectorTy();
     for (Type *P : FTy->params())
