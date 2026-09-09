@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "DowngradeError.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "ValueEnumerator150.h"
 #include "llvm/ADT/APFloat.h"
@@ -574,10 +575,9 @@ static unsigned getEncodedRMWOperation(AtomicRMWInst::BinOp Op) {
     // Operations introduced after LLVM 15 (uinc/udec_wrap in 16,
     // usub_cond/usub_sat in 20) have no encoding its reader accepts; fail
     // loudly instead of emitting garbage.
-    report_fatal_error(Twine("unsupported atomicrmw operation for the "
+    llvmdg::reportError(Twine("unsupported atomicrmw operation for the "
                              "requested bitcode version: ") +
-                           AtomicRMWInst::getOperationName(Op),
-                       false);
+                           AtomicRMWInst::getOperationName(Op));
   case AtomicRMWInst::Xchg: return bitc::RMW_XCHG;
   case AtomicRMWInst::Add: return bitc::RMW_ADD;
   case AtomicRMWInst::Sub: return bitc::RMW_SUB;
@@ -1113,7 +1113,7 @@ void ModuleBitcodeWriter150::writeTypeTable() {
       break;
     }
     case Type::TargetExtTyID:
-      report_fatal_error("Target extension types are not supported with LLVM 15", false);
+      llvmdg::reportError("Target extension types are not supported with LLVM 15");
       break;
     }
 
@@ -2095,7 +2095,7 @@ void ModuleBitcodeWriter150::writeDIAssignID(const DIAssignID *N,
   // DIAssignID (debug-info assignment tracking) post-dates LLVM 15; its
   // METADATA_ASSIGN_ID record code is not understood by the LLVM 15 reader.
   // Reject rather than emit invalid bitcode.
-  report_fatal_error("DIAssignID is not supported with LLVM 15", false);
+  llvmdg::reportError("DIAssignID is not supported with LLVM 15");
 }
 
 void ModuleBitcodeWriter150::writeDIModule(const DIModule *N,
@@ -3161,7 +3161,7 @@ void ModuleBitcodeWriter150::writeInstruction(const Instruction &I,
     // destinations as blockaddress arguments with an "!i" constraint; modern
     // callbr therefore cannot be round-tripped into a form LLVM 15's verifier
     // accepts ("Indirect label missing from arglist").
-    report_fatal_error("cannot encode CallBr instruction for LLVM 15", false);
+    llvmdg::reportError("cannot encode CallBr instruction for LLVM 15");
 
     if (CBI->hasOperandBundles())
       writeOperandBundles(*CBI, InstID);
@@ -4238,7 +4238,7 @@ void ModuleBitcodeWriterBase150::writePerModuleGlobalValueSummary() {
     // Summary emission does not support anonymous functions, they have to
     // renamed using the anonymous function renaming pass.
     if (!F.hasName())
-      report_fatal_error("Unexpected anonymous function when writing summary");
+      llvmdg::reportError("Unexpected anonymous function when writing summary");
 
     ValueInfo VI = Index->getValueInfo(F.getGUID());
     if (!VI || VI.getSummaryList().empty()) {

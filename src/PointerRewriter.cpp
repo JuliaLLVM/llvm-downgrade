@@ -40,6 +40,7 @@
 // operand. This is very useful for custom intrinsics whose type information
 // cannot be inferred from the IR.
 
+#include "DowngradeError.h"
 #include "PointerRewriter.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
@@ -477,8 +478,8 @@ bool bitcastInstructionOperands(Module &M) {
           // invalid ("Invalid cast") for the legacy reader.
           if (GEP->getType()->isVectorTy() ||
               GEP->getPointerOperand()->getType()->isVectorTy())
-            report_fatal_error("vector-of-pointer getelementptr is not "
-                               "supported by the IR downgrader", false);
+            llvmdg::reportError("vector-of-pointer getelementptr is not "
+                               "supported by the IR downgrader");
           Worklist.push_back(GEP);
         } else if (auto *AI = dyn_cast<AllocaInst>(&I))
           Worklist.push_back(AI);
@@ -570,8 +571,8 @@ static Type *typedGlobalValueType(const GlobalValue *GV,
   if (!ValueTy->isPointerTy())
     return ValueTy;
   if (!Seen.insert(GV).second)
-    report_fatal_error("cyclic pointer-typed global initializers are not "
-                       "supported by the IR downgrader", false);
+    llvmdg::reportError("cyclic pointer-typed global initializers are not "
+                       "supported by the IR downgrader");
 
   const Constant *Pointee = nullptr;
   if (const auto *GVar = dyn_cast<GlobalVariable>(GV)) {
@@ -919,10 +920,9 @@ bool PointerRewriter::downgradeModuleFlags(Module &M) {
       Changed = true;
       continue;
     }
-    report_fatal_error(Twine("module flag with a behavior the target LLVM "
+    llvmdg::reportError(Twine("module flag with a behavior the target LLVM "
                              "cannot represent: ") +
-                           (ID ? ID->getString() : "<unnamed>"),
-                       false);
+                           (ID ? ID->getString() : "<unnamed>"));
   }
   return Changed;
 }
@@ -943,11 +943,10 @@ void PointerRewriter::checkIntrinsics(Module &M, unsigned TargetMajor) {
       case Intrinsic::amdgcn_dispatch_ptr:
       case Intrinsic::amdgcn_queue_ptr:
       case Intrinsic::amdgcn_kernarg_segment_ptr:
-        report_fatal_error(Twine("AMDGPU intrinsic predates the LLVM 7 "
+        llvmdg::reportError(Twine("AMDGPU intrinsic predates the LLVM 7 "
                                  "address-space remapping and cannot be "
                                  "downgraded: ") +
-                               F.getName(),
-                           false);
+                               F.getName());
       }
     }
     auto *FTy = F.getFunctionType();
@@ -960,10 +959,9 @@ void PointerRewriter::checkIntrinsics(Module &M, unsigned TargetMajor) {
     // be emitted with {}*-typed pointers against the old typed signature.
     if (getTypedFunctionType(&F) != FTy)
       continue;
-    report_fatal_error(Twine("intrinsic with pointer arguments cannot be "
+    llvmdg::reportError(Twine("intrinsic with pointer arguments cannot be "
                              "downgraded: ") +
-                           F.getName(),
-                       false);
+                           F.getName());
   }
 }
 

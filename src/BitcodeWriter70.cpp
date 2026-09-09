@@ -11,6 +11,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "DowngradeError.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "ValueEnumerator70.h"
 #include "PointerRewriter.h"
@@ -559,10 +560,9 @@ static unsigned getEncodedRMWOperation(AtomicRMWInst::BinOp Op) {
     // Operations introduced after this format (fadd/fsub in LLVM 9, fmax/fmin
     // in 15, uinc/udec_wrap in 16, usub_cond/usub_sat in 20) have no encoding
     // the legacy reader accepts; fail loudly instead of emitting garbage.
-    report_fatal_error(Twine("unsupported atomicrmw operation for the "
+    llvmdg::reportError(Twine("unsupported atomicrmw operation for the "
                              "requested bitcode version: ") +
-                           AtomicRMWInst::getOperationName(Op),
-                       false);
+                           AtomicRMWInst::getOperationName(Op));
   case AtomicRMWInst::Xchg: return bitc::RMW_XCHG;
   case AtomicRMWInst::Add: return bitc::RMW_ADD;
   case AtomicRMWInst::Sub: return bitc::RMW_SUB;
@@ -1040,16 +1040,16 @@ void ModuleBitcodeWriter70::writeTypeTable() {
       break;
     }
     case Type::ScalableVectorTyID:
-      report_fatal_error("scalar vector types are not supported with LLVM 7.0", false);
+      llvmdg::reportError("scalar vector types are not supported with LLVM 7.0");
       break;
     case Type::BFloatTyID:
-      report_fatal_error("bfloat16 type is not supported with LLVM 7.0", false);
+      llvmdg::reportError("bfloat16 type is not supported with LLVM 7.0");
       break;
     case Type::X86_AMXTyID:
-      report_fatal_error("AMX types are not supported with LLVM 7.0", false);
+      llvmdg::reportError("AMX types are not supported with LLVM 7.0");
       break;
     case Type::TargetExtTyID:
-      report_fatal_error("Target extension types are not supported with LLVM 7.0", false);
+      llvmdg::reportError("Target extension types are not supported with LLVM 7.0");
       break;
     }
 
@@ -1641,8 +1641,8 @@ void ModuleBitcodeWriter70::writeDIEnumerator(const DIEnumerator *N,
   // The wide-APInt enumerator encoding only exists from LLVM 9; the 7.0 reader
   // requires exactly [isDistinct | isUnsigned << 1, rotateSign(value), name].
   if (N->getValue().getSignificantBits() > 64)
-    report_fatal_error("DIEnumerator values wider than 64 bit are not "
-                       "supported with LLVM 7.0", false);
+    llvmdg::reportError("DIEnumerator values wider than 64 bit are not "
+                       "supported with LLVM 7.0");
   Record.push_back((N->isUnsigned() << 1) | N->isDistinct());
   Record.push_back(rotateSign(N->getValue().getSExtValue()));
   Record.push_back(VE.getMetadataOrNullID(N->getRawName()));
@@ -2432,8 +2432,8 @@ void ModuleBitcodeWriter70::writeConstants(unsigned FirstVal, unsigned LastVal,
     if (VE.isAggregatePtrCastID(i)) {
       TypedPointerType *SrcTy = PointerMap.lookup(V);
       if (!SrcTy)
-        report_fatal_error("constant-aggregate pointer element without a "
-                           "typed pointer type", false);
+        llvmdg::reportError("constant-aggregate pointer element without a "
+                           "typed pointer type");
       if (V->getType() != LastTy) {
         LastTy = V->getType();
         Record.push_back(VE.getTypeID(LastTy));
@@ -2466,7 +2466,7 @@ void ModuleBitcodeWriter70::writeConstants(unsigned FirstVal, unsigned LastVal,
     if (const InlineAsm *IA = dyn_cast<InlineAsm>(V)) {
       // the legacy record has no unwind bit; dropping it would be unsound
       if (IA->canThrow())
-        report_fatal_error("unwinding inline asm is not supported with LLVM 7.0", false);
+        llvmdg::reportError("unwinding inline asm is not supported with LLVM 7.0");
       Record.push_back(unsigned(IA->hasSideEffects()) |
                        unsigned(IA->isAlignStack()) << 1 |
                        unsigned(IA->getDialect()&1) << 2);
@@ -2587,14 +2587,14 @@ void ModuleBitcodeWriter70::writeConstants(unsigned FirstVal, unsigned LastVal,
         }
         if (!isa<ConstantAggregate, ConstantExpr>(Op) &&
             PointerRewriter::requiresPointerRewriting(cast<Constant>(Op)))
-          report_fatal_error("pointers in constant aggregates are not "
-                             "supported by the IR downgrader", false);
+          llvmdg::reportError("pointers in constant aggregates are not "
+                             "supported by the IR downgrader");
         Record.push_back(VE.getValueID(Op));
       }
       AbbrevToUse = AggregateAbbrev;
     } else if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(C)) {
       if (PointerRewriter::requiresPointerRewriting(C))
-          report_fatal_error("pointers in constant expressions are not supported by the IR downgrader", false);
+          llvmdg::reportError("pointers in constant expressions are not supported by the IR downgrader");
 
       switch (CE->getOpcode()) {
       default:
@@ -2911,7 +2911,7 @@ void ModuleBitcodeWriter70::writeInstruction(const Instruction &I,
     const Value *Callee = II->getCalledOperand();
     FunctionType *FTy = II->getFunctionType();
 
-    report_fatal_error("InvokeInst not yet supported by the IR downgrader", false);
+    llvmdg::reportError("InvokeInst not yet supported by the IR downgrader");
 
     if (II->hasOperandBundles())
       writeOperandBundles(*II, InstID);
@@ -3157,15 +3157,15 @@ void ModuleBitcodeWriter70::writeInstruction(const Instruction &I,
     Vals.push_back(VE.getTypeID(I.getType())); // restype.
     break;
   case Instruction::Freeze: {
-    report_fatal_error("cannot encode freeze instruction for LLVM 7.0", false);
+    llvmdg::reportError("cannot encode freeze instruction for LLVM 7.0");
     break;
   }
   case Instruction::FNeg: {
-    report_fatal_error("cannot encode fneg instruction for LLVM 7.0", false);
+    llvmdg::reportError("cannot encode fneg instruction for LLVM 7.0");
     break;
   }
   case Instruction::CallBr:
-    report_fatal_error("cannot encode CallBr instruction for LLVM 7.0", false);
+    llvmdg::reportError("cannot encode CallBr instruction for LLVM 7.0");
     break;
   }
 
@@ -3865,7 +3865,7 @@ void ModuleBitcodeWriterBase70::writePerModuleGlobalValueSummary() {
     // Summary emission does not support anonymous functions, they have to
     // renamed using the anonymous function renaming pass.
     if (!F.hasName())
-      report_fatal_error("Unexpected anonymous function when writing summary");
+      llvmdg::reportError("Unexpected anonymous function when writing summary");
 
     ValueInfo VI = Index->getValueInfo(F.getGUID());
     if (!VI || VI.getSummaryList().empty()) {
