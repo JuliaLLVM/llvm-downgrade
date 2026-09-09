@@ -104,8 +104,12 @@ is additionally run through the real old verifier:
   -DLLVMDG_OPT_5_0=/path/to/llvm-5/bin/opt   # etc.
 ```
 
-The official LLVM release tarballs provide legacy `llvm-dis` and `opt`
-binaries for the test suite.
+CI obtains LLVM 14 and newer tools from `LLVM_full_jll`. For LLVM 5 and 7,
+`ci/legacy-llvm/build.sh <5|7> <prefix>` builds `llvm-dis`, `opt`, and `llc`
+from pinned release sources without Julia. The build enables X86, AMDGPU, and
+NVPTX code generation and applies the compatibility patches in
+`ci/legacy-llvm/patches/`. CI caches the tools. Set
+`CMAKE_BUILD_PARALLEL_LEVEL` to limit build concurrency.
 
 The C API tests also run in library-only builds and cover buffer ownership,
 invalid input, unsupported formats, and reuse after writer errors.

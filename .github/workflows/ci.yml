@@ -17,21 +17,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Build LLVM 5/7 locally; use LLVM_full_jll for newer readers.
           - target: '5.0'
-            dis_product: llvm_dis_5_path
+            legacy: '5'
             dis_option: LLVMDG_DIS_5_0
+            opt_option: LLVMDG_OPT_5_0
           - target: '7.0'
-            dis_product: llvm_dis_7_path
+            legacy: '7'
+            build_library: 'OFF'
             dis_option: LLVMDG_DIS_7_0
-          # LLVMDowngrader_jll only ships llvm-dis, so from 14.0 on (the oldest
-          # LLVM_full_jll is 8.0.1) use LLVM_full_jll, which also ships opt,
-          # letting the tests run the legacy verifier
+            opt_option: LLVMDG_OPT_7_0
           - target: '14.0'
             llvm_full: '14.0.6'
             dis_option: LLVMDG_DIS_14_0
             opt_option: LLVMDG_OPT_14_0
           - target: '15.0'
             llvm_full: '15.0.7'
+            link_dylib: 'ON'
             dis_option: LLVMDG_DIS_15_0
             opt_option: LLVMDG_OPT_15_0
           - target: '18.0'
@@ -47,26 +49,31 @@ jobs:
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
           sudo apt-get install -y llvm-22-dev llvm-22-tools ninja-build
 
+      - name: Cache legacy LLVM tools
+        if: matrix.legacy
+        id: legacy-cache
+        uses: actions/cache@v4
+        with:
+          path: legacy-llvm-${{ matrix.legacy }}
+          key: legacy-llvm-${{ matrix.legacy }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/legacy-llvm/**') }}
+
+      - name: Build legacy LLVM tools
+        if: matrix.legacy && steps.legacy-cache.outputs.cache-hit != 'true'
+        run: ci/legacy-llvm/build.sh ${{ matrix.legacy }} legacy-llvm-${{ matrix.legacy }}
+
+      - name: Locate legacy llvm-dis and opt
+        if: matrix.legacy
+        run: |
+          echo "DIS=$PWD/legacy-llvm-${{ matrix.legacy }}/bin/llvm-dis" >> "$GITHUB_ENV"
+          echo "OPT=$PWD/legacy-llvm-${{ matrix.legacy }}/bin/opt" >> "$GITHUB_ENV"
+
       - uses: julia-actions/setup-julia@v2
+        if: matrix.llvm_full
         with:
           version: '1'
 
       - uses: julia-actions/cache@v2
-
-      - name: Fetch legacy disassembler (LLVMDowngrader_jll)
-        if: matrix.dis_product
-        env:
-          DIS_PRODUCT: ${{ matrix.dis_product }}
-        run: |
-          julia -e '
-            using Pkg
-            Pkg.activate(; temp=true)
-            Pkg.add("LLVMDowngrader_jll")
-            using LLVMDowngrader_jll
-            open(ENV["GITHUB_ENV"], "a") do io
-                println(io, "DIS=", getproperty(LLVMDowngrader_jll,
-                                                Symbol(ENV["DIS_PRODUCT"])))
-            end'
+        if: matrix.llvm_full
 
       - name: Fetch legacy disassembler (LLVM_full_jll)
         if: matrix.llvm_full
@@ -85,29 +92,60 @@ jobs:
                                              "tools", "opt"))
             end'
 
-      - name: Check legacy disassembler
+      - name: Check legacy tools
         run: |
           "$DIS" --version
+          "$OPT" --version
 
       - name: Configure
         env:
           DIS_OPTION: ${{ matrix.dis_option }}
           OPT_OPTION: ${{ matrix.opt_option }}
+          BUILD_LIBRARY: ${{ matrix.build_library || 'ON' }}
+          LINK_DYLIB: ${{ matrix.link_dylib || 'OFF' }}
         run: |
-          EXTRA=()
-          if [[ -n "$OPT_OPTION" ]]; then
-            EXTRA+=(-D"$OPT_OPTION=$OPT")
-          fi
           cmake -B build -S . -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_DIR=/usr/lib/llvm-22/lib/cmake/llvm \
-            -D"$DIS_OPTION=$DIS" "${EXTRA[@]}"
+            -DLLVMDG_BUILD_LIBRARY="$BUILD_LIBRARY" \
+            -DLLVMDG_LINK_DYLIB="$LINK_DYLIB" \
+            -D"$DIS_OPTION=$DIS" -D"$OPT_OPTION=$OPT"
 
       - name: Build
         run: cmake --build build
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      - name: Check legacy code generation
+        if: matrix.legacy
+        env:
+          LEGACY: ${{ matrix.legacy }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          printf 'define i32 @f() { ret i32 42 }\n' |
+            build/llvm-downgrade --bitcode-version="$TARGET" -o smoke.bc
+          "legacy-llvm-$LEGACY/bin/llc" -mtriple=x86_64-pc-linux-gnu -filetype=obj smoke.bc -o smoke.o
+
+  library:
+    name: Library only
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM 22
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
+          sudo apt-get install -y llvm-22-dev llvm-22-tools ninja-build
+      - name: Configure
+        run: |
+          cmake -B build -S . -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR=/usr/lib/llvm-22/lib/cmake/llvm \
+            -DLLVMDG_BUILD_TOOL=OFF
+      - name: Build and test
+        run: |
+          cmake --build build
+          ctest --test-dir build --output-on-failure
 
   integration:
     name: ROCm device libraries
