@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "DowngradeError.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "ValueEnumerator180.h"
 #include "llvm/ADT/APFloat.h"
@@ -618,10 +619,9 @@ static unsigned getEncodedRMWOperation(AtomicRMWInst::BinOp Op) {
   default:
     // Operations introduced after LLVM 18 (usub_cond/usub_sat in 20) have no
     // encoding its reader accepts; fail loudly instead of emitting garbage.
-    report_fatal_error(Twine("unsupported atomicrmw operation for the "
+    llvmdg::reportError(Twine("unsupported atomicrmw operation for the "
                              "requested bitcode version: ") +
-                           AtomicRMWInst::getOperationName(Op),
-                       false);
+                           AtomicRMWInst::getOperationName(Op));
   case AtomicRMWInst::Xchg: return bitc::RMW_XCHG;
   case AtomicRMWInst::Add: return bitc::RMW_ADD;
   case AtomicRMWInst::Sub: return bitc::RMW_SUB;
@@ -4393,7 +4393,7 @@ void ModuleBitcodeWriterBase180::writePerModuleGlobalValueSummary() {
     // Summary emission does not support anonymous functions, they have to
     // renamed using the anonymous function renaming pass.
     if (!F.hasName())
-      report_fatal_error("Unexpected anonymous function when writing summary");
+      llvmdg::reportError("Unexpected anonymous function when writing summary");
 
     ValueInfo VI = Index->getValueInfo(F.getGUID());
     if (!VI || VI.getSummaryList().empty()) {

@@ -1,3 +1,21 @@
+# Exercise the C ABI in library-only builds too.
+add_executable(llvm-downgrade-api-test api.c)
+set_property(TARGET llvm-downgrade-api-test PROPERTY C_STANDARD 99)
+if(LLVMDG_BUILD_LIBRARY)
+  target_link_libraries(llvm-downgrade-api-test PRIVATE llvm_downgrade)
+else()
+  target_sources(llvm-downgrade-api-test PRIVATE $<TARGET_OBJECTS:llvm_downgrade_core>)
+  target_compile_definitions(llvm-downgrade-api-test PRIVATE LLVMDG_STATIC)
+  target_link_libraries(llvm-downgrade-api-test PRIVATE ${_llvm_libs})
+endif()
+add_test(NAME api COMMAND llvm-downgrade-api-test)
+
+if(NOT LLVMDG_BUILD_TOOL)
+  return()
+endif()
+
+add_test(NAME cli COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cli.sh $<TARGET_FILE:llvm-downgrade>)
+
 # FileCheck-based downgrader tests. Each tests/<name>.ll is downgraded to its
 # target bitcode version(s), disassembled with the matching *legacy* llvm-dis,
 # and checked with FileCheck (see run-downgrade-test.sh).

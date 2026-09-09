@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "DowngradeError.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "ValueEnumerator140.h"
 #include "PointerRewriter.h"
@@ -582,10 +583,9 @@ static unsigned getEncodedRMWOperation(AtomicRMWInst::BinOp Op) {
     // Operations introduced after LLVM 14 (fmax/fmin in 15, uinc/udec_wrap in
     // 16, usub_cond/usub_sat in 20) have no encoding its reader accepts; fail
     // loudly instead of emitting garbage.
-    report_fatal_error(Twine("unsupported atomicrmw operation for the "
+    llvmdg::reportError(Twine("unsupported atomicrmw operation for the "
                              "requested bitcode version: ") +
-                           AtomicRMWInst::getOperationName(Op),
-                       false);
+                           AtomicRMWInst::getOperationName(Op));
   case AtomicRMWInst::Xchg: return bitc::RMW_XCHG;
   case AtomicRMWInst::Add: return bitc::RMW_ADD;
   case AtomicRMWInst::Sub: return bitc::RMW_SUB;
@@ -1129,7 +1129,7 @@ void ModuleBitcodeWriter140::writeTypeTable() {
       break;
     }
     case Type::TargetExtTyID:
-      report_fatal_error("Target extension types are not supported with LLVM 14", false);
+      llvmdg::reportError("Target extension types are not supported with LLVM 14");
       break;
     }
 
@@ -1796,7 +1796,7 @@ void ModuleBitcodeWriter140::writeDIFixedPointType(
     unsigned Abbrev) {
   // The METADATA_FIXED_POINT_TYPE record code postdates LLVM 14; its reader
   // rejects it. Reject rather than emit invalid bitcode.
-  report_fatal_error("DIFixedPointType is not supported with LLVM 14", false);
+  llvmdg::reportError("DIFixedPointType is not supported with LLVM 14");
 }
 
 void ModuleBitcodeWriter140::writeDISubrangeType(
@@ -1804,7 +1804,7 @@ void ModuleBitcodeWriter140::writeDISubrangeType(
     unsigned Abbrev) {
   // The METADATA_SUBRANGE_TYPE record code postdates LLVM 14; its reader
   // rejects it. Reject rather than emit invalid bitcode.
-  report_fatal_error("DISubrangeType is not supported with LLVM 14", false);
+  llvmdg::reportError("DISubrangeType is not supported with LLVM 14");
 }
 
 void ModuleBitcodeWriter140::writeDIStringType(const DIStringType *N,
@@ -2088,7 +2088,7 @@ void ModuleBitcodeWriter140::writeDIAssignID(const DIAssignID *N,
   // DIAssignID (debug-info assignment tracking) post-dates LLVM 14; its
   // METADATA_ASSIGN_ID record code is not understood by the LLVM 14 reader.
   // AIR modules never carry it, so reject rather than emit invalid bitcode.
-  report_fatal_error("DIAssignID is not supported with LLVM 14", false);
+  llvmdg::reportError("DIAssignID is not supported with LLVM 14");
 }
 
 void ModuleBitcodeWriter140::writeDIModule(const DIModule *N,
@@ -2638,8 +2638,8 @@ void ModuleBitcodeWriter140::writeConstants(unsigned FirstVal, unsigned LastVal,
     if (VE.isAggregatePtrCastID(i)) {
       TypedPointerType *SrcTy = PointerMap.lookup(V);
       if (!SrcTy)
-        report_fatal_error("constant-aggregate pointer element without a "
-                           "typed pointer type", false);
+        llvmdg::reportError("constant-aggregate pointer element without a "
+                           "typed pointer type");
       if (V->getType() != LastTy) {
         LastTy = V->getType();
         Record.push_back(VE.getTypeID(LastTy));
@@ -2784,14 +2784,14 @@ void ModuleBitcodeWriter140::writeConstants(unsigned FirstVal, unsigned LastVal,
         }
         if (!isa<ConstantAggregate, ConstantExpr>(Op) &&
             PointerRewriter::requiresPointerRewriting(cast<Constant>(Op)))
-          report_fatal_error("pointers in constant aggregates are not "
-                             "supported by the IR downgrader", false);
+          llvmdg::reportError("pointers in constant aggregates are not "
+                             "supported by the IR downgrader");
         Record.push_back(VE.getValueID(Op));
       }
       AbbrevToUse = AggregateAbbrev;
     } else if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(C)) {
       if (PointerRewriter::requiresPointerRewriting(C))
-        report_fatal_error("pointers in constant expressions are not supported by the IR downgrader", false);
+        llvmdg::reportError("pointers in constant expressions are not supported by the IR downgrader");
 
       switch (CE->getOpcode()) {
       default:
@@ -3219,7 +3219,7 @@ void ModuleBitcodeWriter140::writeInstruction(const Instruction &I,
     // destinations as blockaddress arguments with an "!i" constraint; modern
     // callbr therefore cannot be round-tripped into a form LLVM 14's verifier
     // accepts ("Indirect label missing from arglist").
-    report_fatal_error("cannot encode CallBr instruction for LLVM 14", false);
+    llvmdg::reportError("cannot encode CallBr instruction for LLVM 14");
 
     if (CBI->hasOperandBundles())
       writeOperandBundles(*CBI, InstID);
@@ -4271,7 +4271,7 @@ void ModuleBitcodeWriterBase140::writePerModuleGlobalValueSummary() {
     // Summary emission does not support anonymous functions, they have to
     // renamed using the anonymous function renaming pass.
     if (!F.hasName())
-      report_fatal_error("Unexpected anonymous function when writing summary");
+      llvmdg::reportError("Unexpected anonymous function when writing summary");
 
     ValueInfo VI = Index->getValueInfo(F.getGUID());
     if (!VI || VI.getSummaryList().empty()) {

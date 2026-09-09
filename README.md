@@ -27,7 +27,7 @@ the handful of LLVM headers the downgrader has to augment: the legacy-writer
 declarations in `BitcodeWriter.h`, `ATTR_KIND_INVALID` in `LLVMBitCodes.h`, and
 `Metadata{50,70}.def`. These shadow the installed copies. `common/` defines the
 two `cl::opt`s the in-tree downgrader de-statics, which is how we avoid needing a
-patched libLLVM. The driver is `tools/llvm-downgrade.cpp`.
+patched libLLVM. The driver is `tools/llvm-downgrade.c`.
 
 ## Building
 
@@ -38,12 +38,42 @@ cmake -B build -S . -G Ninja -DLLVM_DIR=/path/to/lib/cmake/llvm
 cmake --build build
 ```
 
-By default it links the LLVM component static libraries, so the tool is
-self-contained and has no runtime libLLVM dependency. Pass `-DLLVMDG_LINK_DYLIB=ON`
-to link the monolithic `libLLVM` instead, for example against a distro LLVM that
-only ships the shared library. It is a normal release build: unsupported IR
-constructs are rejected with `report_fatal_error`, so the tool fails loudly
-instead of leaning on assertions.
+This builds the `libllvm_downgrade` shared library and the `llvm-downgrade`
+command-line tool. Set `-DLLVMDG_BUILD_LIBRARY=OFF` to embed the writers in the
+tool, or `-DLLVMDG_BUILD_TOOL=OFF` to build only the library. Install with
+`cmake --install build --prefix /path/to/install`.
+
+By default, LLVM's static component libraries are linked into the downgrader.
+Their symbols are hidden in the shared library so it can coexist with another
+LLVM in the same process. This requires LLVM archives built with position
+independent code. Set `-DLLVMDG_LINK_DYLIB=ON` to link the shared `libLLVM`
+instead; that configuration uses the process's LLVM and does not isolate it.
+
+## Library
+
+`include/llvm-downgrade.h` follows the `llvm-c` conventions: bitcode in,
+bitcode out, status as return value, message on failure.
+
+```c
+#include <llvm-downgrade.h>
+#include <stdio.h>
+
+LLVMDGMemoryBufferRef Out;
+char *Message;
+if (LLVMDGDowngrade(Data, Length, 14, 0, &Out, &Message)) {
+  fprintf(stderr, "%s\n", Message ? Message : "downgrade failed");
+  LLVMDGDisposeMessage(Message);
+} else {
+  fwrite(LLVMDGGetBufferStart(Out), 1, LLVMDGGetBufferSize(Out), File);
+  LLVMDGDisposeMemoryBuffer(Out);
+}
+```
+
+`LLVMDGGetTargets` lists the formats the build can emit and `LLVMDGGetLLVMVersion`
+the LLVM it was built on. Downgrade calls are serialized; returned buffers are
+independent and owned by the caller. Parsing errors and unsupported constructs
+return an error status. Internal LLVM fatal errors and assertions remain fatal.
+Link C clients with `-lllvm_downgrade`.
 
 ## Testing
 
@@ -74,8 +104,15 @@ is additionally run through the real old verifier:
   -DLLVMDG_OPT_5_0=/path/to/llvm-5/bin/opt   # etc.
 ```
 
-The official release tarballs from releases.llvm.org provide suitable
-`llvm-dis`/`opt` binaries for all three versions.
+CI obtains LLVM 14 and newer tools from `LLVM_full_jll`. For LLVM 5 and 7,
+`ci/legacy-llvm/build.sh <5|7> <prefix>` builds `llvm-dis`, `opt`, and `llc`
+from pinned release sources without Julia. The build enables X86, AMDGPU, and
+NVPTX code generation and applies the compatibility patches in
+`ci/legacy-llvm/patches/`. CI caches the tools. Set
+`CMAKE_BUILD_PARALLEL_LEVEL` to limit build concurrency.
+
+The C API tests also run in library-only builds and cover buffer ownership,
+invalid input, unsupported formats, and reuse after writer errors.
 
 `test/run-downgrade-test.sh` documents the per-test directives (`VERSIONS`,
 `MIN-LLVM`/`MAX-LLVM`, `XFAIL-AS`, `XFAIL-DIS-V*`) and the FileCheck prefixes.
@@ -88,8 +125,7 @@ it.
 
 ## Limitations
 
-Constructs with no reasonable legacy representation are rejected with a fatal
-error rather than silently miscompiled: exception handling (`invoke`, 5.0/7.0
+Constructs with no reasonable legacy representation return an error: exception handling (`invoke`, 5.0/7.0
 targets), `callbr`, atomicrmw operations newer than the target format,
 vector-of-pointer GEPs, unwinding inline asm (5.0/7.0), scalable vectors /
 bfloat / AMX (5.0/7.0), target extension types, pointer-typed intrinsics
