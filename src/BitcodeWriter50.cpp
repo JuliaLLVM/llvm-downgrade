@@ -1025,6 +1025,9 @@ void ModuleBitcodeWriter50::writeTypeTable() {
     case Type::X86_AMXTyID:
       llvmdg::reportError("AMX types are not supported with LLVM 5.0");
       break;
+    case Type::ByteTyID:
+      llvmdg::reportError("Byte types are not supported with LLVM 5.0");
+      break;
     case Type::TargetExtTyID:
       llvmdg::reportError("Target extension types are not supported with LLVM 5.0");
       break;
@@ -1210,9 +1213,15 @@ void ModuleBitcodeWriter50::writeModuleInfo() {
   const std::string &DL = M.getDataLayoutStr();
   if (!DL.empty())
     writeStringRecord(Stream, bitc::MODULE_CODE_DATALAYOUT, DL, 0 /*TODO*/);
-  if (!M.getModuleInlineAsm().empty())
-    writeStringRecord(Stream, bitc::MODULE_CODE_ASM, M.getModuleInlineAsm(),
-                      0 /*TODO*/);
+  // Since LLVM 23 module-level inline asm is a list of fragments with
+  // per-fragment target properties. The legacy record is a single string, so
+  // concatenate the fragments and drop the properties.
+  if (M.hasModuleInlineAsm()) {
+    std::string Asm;
+    for (const Module::GlobalAsmFragment &Frag : M.getModuleInlineAsm())
+      Asm += Frag.Asm;
+    writeStringRecord(Stream, bitc::MODULE_CODE_ASM, Asm, 0 /*TODO*/);
+  }
 
   // Emit information about sections and GC, computing how many there are. Also
   // compute the maximum alignment value.
@@ -2819,15 +2828,20 @@ void ModuleBitcodeWriter50::writeInstruction(const Instruction &I,
       }
     }
     break;
-  case Instruction::Br:
+  case Instruction::UncondBr:
     {
       Code = bitc::FUNC_CODE_INST_BR;
-      const BranchInst &II = cast<BranchInst>(I);
+      const UncondBrInst &II = cast<UncondBrInst>(I);
       Vals.push_back(VE.getValueID(II.getSuccessor(0)));
-      if (II.isConditional()) {
-        Vals.push_back(VE.getValueID(II.getSuccessor(1)));
-        pushValue(II.getCondition(), InstID, Vals);
-      }
+    }
+    break;
+  case Instruction::CondBr:
+    {
+      Code = bitc::FUNC_CODE_INST_BR;
+      const CondBrInst &II = cast<CondBrInst>(I);
+      Vals.push_back(VE.getValueID(II.getSuccessor(0)));
+      Vals.push_back(VE.getValueID(II.getSuccessor(1)));
+      pushValue(II.getCondition(), InstID, Vals);
     }
     break;
   case Instruction::Switch:
@@ -3969,7 +3983,8 @@ void IndexBitcodeWriter50::writeCombinedGlobalValueSummary() {
   }
 
   if (!Index.cfiFunctionDefs().empty()) {
-    for (auto &S : Index.cfiFunctionDefs().symbols()) {
+    for (const auto &Sym : Index.cfiFunctionDefs().getSortedSymbols()) {
+      StringRef S = Sym.first;
       NameVals.push_back(StrtabBuilder.add(S));
       NameVals.push_back(S.size());
     }
@@ -3978,7 +3993,8 @@ void IndexBitcodeWriter50::writeCombinedGlobalValueSummary() {
   }
 
   if (!Index.cfiFunctionDecls().empty()) {
-    for (auto &S : Index.cfiFunctionDecls().symbols()) {
+    for (const auto &Sym : Index.cfiFunctionDecls().getSortedSymbols()) {
+      StringRef S = Sym.first;
       NameVals.push_back(StrtabBuilder.add(S));
       NameVals.push_back(S.size());
     }

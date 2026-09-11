@@ -22,7 +22,7 @@ hand-written tests.
 5.0, 7.0, 14.0, 15.0 and 18.1 releases, adapted to build against the host LLVM's
 C++ API. That
 API moves every release, so the sources are tied to one host LLVM version; this
-checkout is LLVM 22 (`LLVMDG_LLVM_MAJOR` in `CMakeLists.txt`). `include/` carries
+checkout is LLVM 23 (`LLVMDG_LLVM_MAJOR` in `CMakeLists.txt`). `include/` carries
 the handful of LLVM headers the downgrader has to augment: the legacy-writer
 declarations in `BitcodeWriter.h`, `ATTR_KIND_INVALID` in `LLVMBitCodes.h`, and
 `Metadata{50,70}.def`. These shadow the installed copies. `common/` defines the
