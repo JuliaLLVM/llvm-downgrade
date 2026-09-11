@@ -39,7 +39,7 @@ int main(void) {
   CHECK(Targets == LLVMDGGetTargets(NULL));
   unsigned Major, Minor, Patch;
   LLVMDGGetLLVMVersion(&Major, &Minor, &Patch);
-  CHECK(Major == 22);
+  CHECK(Major == LLVMDG_LLVM_MAJOR);
   LLVMDGGetLLVMVersion(NULL, NULL, NULL);
   LLVMDGDisposeMessage(NULL);
   LLVMDGDisposeMemoryBuffer(NULL);

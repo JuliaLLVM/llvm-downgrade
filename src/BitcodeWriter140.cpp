@@ -89,7 +89,6 @@ using namespace llvm;
 // BitWriter component) rather than redefining them; redefining would register
 // the same cl::opt names twice and abort at startup.
 extern cl::opt<unsigned> IndexThreshold;
-extern cl::opt<bool> WriteRelBFToSummary;
 
 namespace llvm {
 extern FunctionSummary::ForceSummaryHotnessType ForceSummaryEdgesCold;
@@ -1128,6 +1127,9 @@ void ModuleBitcodeWriter140::writeTypeTable() {
         TypeVals.push_back(true);
       break;
     }
+    case Type::ByteTyID:
+      llvmdg::reportError("Byte types are not supported with LLVM 14");
+      break;
     case Type::TargetExtTyID:
       llvmdg::reportError("Target extension types are not supported with LLVM 14");
       break;
@@ -1340,9 +1342,15 @@ void ModuleBitcodeWriter140::writeModuleInfo() {
   const std::string &DL = M.getDataLayoutStr();
   if (!DL.empty())
     writeStringRecord(Stream, bitc::MODULE_CODE_DATALAYOUT, DL, 0 /*TODO*/);
-  if (!M.getModuleInlineAsm().empty())
-    writeStringRecord(Stream, bitc::MODULE_CODE_ASM, M.getModuleInlineAsm(),
-                      0 /*TODO*/);
+  // Since LLVM 23 module-level inline asm is a list of fragments with
+  // per-fragment target properties. The legacy record is a single string, so
+  // concatenate the fragments and drop the properties.
+  if (M.hasModuleInlineAsm()) {
+    std::string Asm;
+    for (const Module::GlobalAsmFragment &Frag : M.getModuleInlineAsm())
+      Asm += Frag.Asm;
+    writeStringRecord(Stream, bitc::MODULE_CODE_ASM, Asm, 0 /*TODO*/);
+  }
 
   // Emit information about sections and GC, computing how many there are. Also
   // compute the maximum alignment value.
@@ -3102,15 +3110,20 @@ void ModuleBitcodeWriter140::writeInstruction(const Instruction &I,
       }
     }
     break;
-  case Instruction::Br:
+  case Instruction::UncondBr:
     {
       Code = bitc::FUNC_CODE_INST_BR;
-      const BranchInst &II = cast<BranchInst>(I);
+      const UncondBrInst &II = cast<UncondBrInst>(I);
       Vals.push_back(VE.getValueID(II.getSuccessor(0)));
-      if (II.isConditional()) {
-        Vals.push_back(VE.getValueID(II.getSuccessor(1)));
-        pushValue(II.getCondition(), InstID, Vals);
-      }
+    }
+    break;
+  case Instruction::CondBr:
+    {
+      Code = bitc::FUNC_CODE_INST_BR;
+      const CondBrInst &II = cast<CondBrInst>(I);
+      Vals.push_back(VE.getValueID(II.getSuccessor(0)));
+      Vals.push_back(VE.getValueID(II.getSuccessor(1)));
+      pushValue(II.getCondition(), InstID, Vals);
     }
     break;
   case Instruction::Switch:
@@ -4099,15 +4112,11 @@ void ModuleBitcodeWriterBase140::writePerModuleFunctionSummaryRecord(
     NameVals.push_back(getValueId(ECI.first));
     if (HasProfileData)
       NameVals.push_back(static_cast<uint8_t>(ECI.second.Hotness));
-    else if (WriteRelBFToSummary)
-      NameVals.push_back(ECI.second.RelBlockFreq);
   }
 
   unsigned FSAbbrev = (HasProfileData ? FSCallsProfileAbbrev : FSCallsAbbrev);
   unsigned Code =
-      (HasProfileData ? bitc::FS_PERMODULE_PROFILE
-                      : (WriteRelBFToSummary ? bitc::FS_PERMODULE_RELBF
-                                             : bitc::FS_PERMODULE));
+      (HasProfileData ? bitc::FS_PERMODULE_PROFILE : bitc::FS_PERMODULE);
 
   // Emit the finished record.
   Stream.EmitRecord(Code, NameVals, FSAbbrev);
@@ -4208,12 +4217,10 @@ void ModuleBitcodeWriterBase140::writePerModuleGlobalValueSummary() {
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 8));
   unsigned FSCallsProfileAbbrev = Stream.EmitAbbrev(std::move(Abbv));
 
-  // Abbrev for FS_PERMODULE or FS_PERMODULE_RELBF.
+  // Abbrev for FS_PERMODULE. FS_PERMODULE_RELBF is never emitted: LLVM 23
+  // dropped the relative block frequency from CalleeInfo.
   Abbv = std::make_shared<BitCodeAbbrev>();
-  if (WriteRelBFToSummary)
-    Abbv->Add(BitCodeAbbrevOp(bitc::FS_PERMODULE_RELBF));
-  else
-    Abbv->Add(BitCodeAbbrevOp(bitc::FS_PERMODULE));
+  Abbv->Add(BitCodeAbbrevOp(bitc::FS_PERMODULE));
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 8));   // valueid
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6));   // flags
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 8));   // instcount
@@ -4221,7 +4228,7 @@ void ModuleBitcodeWriterBase140::writePerModuleGlobalValueSummary() {
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 4));   // numrefs
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 4));   // rorefcnt
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 4));   // worefcnt
-  // numrefs x valueid, n x (valueid [, rel_block_freq])
+  // numrefs x valueid, n x valueid
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 8));
   unsigned FSCallsAbbrev = Stream.EmitAbbrev(std::move(Abbv));
@@ -4552,7 +4559,8 @@ void IndexBitcodeWriter140::writeCombinedGlobalValueSummary() {
   }
 
   if (!Index.cfiFunctionDefs().empty()) {
-    for (StringRef S : Index.cfiFunctionDefs().symbols()) {
+    for (const auto &Sym : Index.cfiFunctionDefs().getSortedSymbols()) {
+      StringRef S = Sym.first;
       if (DefOrUseGUIDs.count(GlobalValue::getGUIDAssumingExternalLinkage(
               GlobalValue::dropLLVMManglingEscape(S)))) {
         NameVals.push_back(StrtabBuilder.add(S));
@@ -4566,7 +4574,8 @@ void IndexBitcodeWriter140::writeCombinedGlobalValueSummary() {
   }
 
   if (!Index.cfiFunctionDecls().empty()) {
-    for (StringRef S : Index.cfiFunctionDecls().symbols()) {
+    for (const auto &Sym : Index.cfiFunctionDecls().getSortedSymbols()) {
+      StringRef S = Sym.first;
       if (DefOrUseGUIDs.count(GlobalValue::getGUIDAssumingExternalLinkage(
               GlobalValue::dropLLVMManglingEscape(S)))) {
         NameVals.push_back(StrtabBuilder.add(S));

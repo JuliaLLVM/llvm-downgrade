@@ -1,6 +1,7 @@
 # Exercise the C ABI in library-only builds too.
 add_executable(llvm-downgrade-api-test api.c)
 set_property(TARGET llvm-downgrade-api-test PROPERTY C_STANDARD 99)
+target_compile_definitions(llvm-downgrade-api-test PRIVATE LLVMDG_LLVM_MAJOR=${LLVMDG_LLVM_MAJOR})
 if(LLVMDG_BUILD_LIBRARY)
   target_link_libraries(llvm-downgrade-api-test PRIVATE llvm_downgrade)
 else()
