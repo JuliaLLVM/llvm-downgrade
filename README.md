@@ -130,7 +130,7 @@ targets), `callbr`, atomicrmw operations newer than the target format,
 vector-of-pointer GEPs, unwinding inline asm (5.0/7.0), scalable vectors /
 bfloat / AMX (5.0/7.0), target extension types, pointer-typed intrinsics
 without a known typed signature (5.0/7.0), `DIEnumerator` values wider than 64
-bits (5.0/7.0), and `DIAssignID`/`DIFixedPointType`/`DISubrangeType` (14.0).
+bits (5.0/7.0), `DIAssignID` (14.0), and `DIFixedPointType`/`DISubrangeType` (14.0, 18.0, 20.0).
 
 Some information is dropped, always soundly: attribute kinds that postdate the
 target (`nofpclass`, `range`, partial `captures`, ...), poison-generating
