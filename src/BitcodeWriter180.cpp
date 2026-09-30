@@ -856,6 +856,22 @@ static uint64_t getAttrKindEncoding180(Attribute::AttrKind Kind) {
   }
 }
 
+// LLVM 18 knows three memory locations, packed as two ModRef bits each: argmem,
+// inaccessiblemem and other memory. LLVM 21 split errnomem out of other memory
+// and LLVM 22 added target_mem0/1, which shifts the fields of the host's
+// encoding. Fold the new locations back into the ones that used to cover them;
+// the host reader applies the inverse when it upgrades such old encodings.
+static uint64_t encodeLegacyMemoryEffects(MemoryEffects ME) {
+  ModRefInfo ArgMem = ME.getModRef(IRMemLocation::ArgMem);
+  ModRefInfo InaccessibleMem = ME.getModRef(IRMemLocation::InaccessibleMem) |
+                               ME.getModRef(IRMemLocation::TargetMem0) |
+                               ME.getModRef(IRMemLocation::TargetMem1);
+  ModRefInfo OtherMem = ME.getModRef(IRMemLocation::Other) |
+                        ME.getModRef(IRMemLocation::ErrnoMem);
+  return uint64_t(ArgMem) | uint64_t(InaccessibleMem) << 2 |
+         uint64_t(OtherMem) << 4;
+}
+
 // Append the LLVM 18 encoding of Attr to Record, returning how many attribute
 // entries were emitted. A null Record only counts (VE may then be null too).
 // ValueEnumerator180 uses the counting mode (via countEncodableAttrs180) to
@@ -877,6 +893,12 @@ unsigned encodeAttribute180(const Attribute &Attr,
     if (!capturesNothing(Attr.getCaptureInfo()))
       return 0;
     Emit({0, bitc::ATTR_KIND_NO_CAPTURE});
+    return 1;
+  }
+
+  if (Attr.hasAttribute(Attribute::Memory)) {
+    Emit({1, bitc::ATTR_KIND_MEMORY,
+          encodeLegacyMemoryEffects(Attr.getMemoryEffects())});
     return 1;
   }
 
