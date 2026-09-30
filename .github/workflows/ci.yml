@@ -31,13 +31,9 @@ jobs:
             llvm_full: '14.0.6'
             dis_option: LLVMDG_DIS_14_0
             opt_option: LLVMDG_OPT_14_0
-          - target: '15.0'
-            llvm_full: '15.0.7'
-            link_dylib: 'ON'
-            dis_option: LLVMDG_DIS_15_0
-            opt_option: LLVMDG_OPT_15_0
           - target: '18.0'
             llvm_full: '18.1.7'
+            link_dylib: 'ON'
             dis_option: LLVMDG_DIS_18_0
             opt_option: LLVMDG_OPT_18_0
 
@@ -167,7 +163,7 @@ jobs:
 
       - name: Fetch legacy LLVM binaries (LLVM_full_jll)
         run: |
-          for spec in 14:14.0.6 15:15.0.7 18:18.1.7; do
+          for spec in 14:14.0.6 18:18.1.7; do
             MAJOR="${spec%%:*}" VERSION="${spec#*:}" julia -e '
               using Pkg
               Pkg.activate(; temp=true)
@@ -196,5 +192,4 @@ jobs:
           julia --startup-file=no test/integration/downgrade_devicelibs.jl \
             --tool build/llvm-downgrade \
             --dis-14 "$DIS_14" --opt-14 "$OPT_14" \
-            --dis-15 "$DIS_15" --opt-15 "$OPT_15" \
             --dis-18 "$DIS_18" --opt-18 "$OPT_18"

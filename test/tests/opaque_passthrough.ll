@@ -1,6 +1,6 @@
 ; MIN-LLVM: 15  (uses opaque `ptr`; opaque pointers are LLVM 15+)
-; VERSIONS: 15.0 18.0
-; The 15.0/18.0 targets emit opaque pointers natively: no retyping, `ptr`
+; VERSIONS: 18.0
+; The 18.0 target emits opaque pointers natively: no retyping, `ptr`
 ; survives the round trip (unlike the 5.0/7.0/14.0 targets, which lower to
 ; typed pointers).
 @g = external global [4 x i32]

@@ -8,7 +8,7 @@ llvm-downgrade input.bc -o output.bc --bitcode-version=14.0
 ```
 
 It reads bitcode and writes bitcode, in one of the legacy formats 5.0, 7.0,
-14.0, 15.0 or 18.0. The input is auto-upgraded to the host LLVM as it loads, and LLVM's bitcode
+14.0 or 18.0. The input is auto-upgraded to the host LLVM as it loads, and LLVM's bitcode
 reader stays compatible back to 3.0, so a tool built on a recent LLVM can
 downgrade bitcode from any older one. Build it on the newest LLVM you need to read.
 
@@ -19,7 +19,7 @@ hand-written tests.
 ## How it works
 
 `src/` holds forks of LLVM's own `BitcodeWriter` and `ValueEnumerator` from the
-5.0, 7.0, 14.0, 15.0 and 18.1 releases, adapted to build against the host LLVM's
+5.0, 7.0, 14.0 and 18.1 releases, adapted to build against the host LLVM's
 C++ API. That
 API moves every release, so the sources are tied to one host LLVM version; this
 checkout is LLVM 23 (`LLVMDG_LLVM_MAJOR` in `CMakeLists.txt`). `include/` carries
@@ -91,7 +91,6 @@ cmake -B build -S . -DLLVM_DIR=... \
   -DLLVMDG_DIS_5_0=/path/to/llvm-5/bin/llvm-dis \
   -DLLVMDG_DIS_7_0=/path/to/llvm-7/bin/llvm-dis \
   -DLLVMDG_DIS_14_0=/path/to/llvm-14/bin/llvm-dis \
-  -DLLVMDG_DIS_15_0=/path/to/llvm-15/bin/llvm-dis \
   -DLLVMDG_DIS_18_0=/path/to/llvm-18/bin/llvm-dis
 ```
 
@@ -120,7 +119,7 @@ invalid input, unsupported formats, and reuse after writer errors.
 `test/integration/downgrade_devicelibs.jl` is a Julia integration test that
 fetches the ROCm device libraries shipped by the latest
 `AMDGPU_LLVM_Backend_jll` and downgrades all of them to the LLVM versions we
-care about (14, 15, and 18). See `.github/workflows/ci.yml` for how to invoke
+care about (14 and 18). See `.github/workflows/ci.yml` for how to invoke
 it.
 
 ## Limitations

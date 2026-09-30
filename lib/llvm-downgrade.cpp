@@ -64,13 +64,6 @@ constexpr Target Targets[] = {
        WriteBitcode140ToFile(M, OS);
      }},
 #endif
-#ifdef LLVMDG_HAS_150
-    {"15.0", 15, 0,
-     [](Module &M, raw_ostream &OS) {
-       BitcodeWriter150::prepareModule(M);
-       WriteBitcode150ToFile(M, OS);
-     }},
-#endif
 #ifdef LLVMDG_HAS_180
     {"18.0", 18, 0,
      [](Module &M, raw_ostream &OS) {

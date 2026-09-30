@@ -1,4 +1,4 @@
-; VERSIONS: 5.0 7.0 14.0 15.0 18.0
+; VERSIONS: 5.0 7.0 14.0 18.0
 ; MIN-LLVM: 20
 ; atomicrmw usub_cond (LLVM 20) has no legacy encoding on any target.
 ; XFAIL-AS: unsupported atomicrmw operation

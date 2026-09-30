@@ -1,4 +1,4 @@
-; VERSIONS: 5.0 7.0 14.0 15.0
+; VERSIONS: 5.0 7.0 14.0
 ; MIN-LLVM: 16
 ; atomicrmw uinc_wrap (LLVM 16) has no legacy encoding on any pre-16 target
 ; (18.0 encodes it natively; see atomicrmw_wrap.ll).
