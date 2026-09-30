@@ -1,7 +1,7 @@
 ; MIN-LLVM: 22  (errnomem is LLVM 21+, target_mem0/1 LLVM 22+)
-; VERSIONS: 18.0
+; VERSIONS: 18.0 20.0
 ; memory(...) packs two bits per location. LLVM 21 and 22 added locations that
-; LLVM 18 does not know, which changes the layout of the encoded value; they
+; LLVM 18 and 20 do not know, which changes the layout of the encoded value; they
 ; have to be folded back into the location that covered them before (errnomem
 ; into other memory, target_mem into inaccessible memory) instead of being
 ; misread as a different location.

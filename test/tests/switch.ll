@@ -1,4 +1,4 @@
-; VERSIONS: 5.0 7.0 14.0 18.0
+; VERSIONS: 5.0 7.0 14.0 18.0 20.0
 ; Since LLVM 22 switch case values are no longer instruction operands, so the
 ; enumerators must collect them via SwitchInst::cases() explicitly. Constants
 ; referenced *only* as case values (all of the ones below) used to be left out

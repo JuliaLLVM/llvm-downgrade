@@ -1,4 +1,4 @@
-; VERSIONS: 5.0 7.0 14.0 18.0
+; VERSIONS: 5.0 7.0 14.0 18.0 20.0
 ; MIN-LLVM: 18
 ; Attribute kinds that postdate a target must be dropped cleanly -- the 14.0
 ; encoder used to emit garbage codes for them (llvm_unreachable fallthrough in
@@ -8,10 +8,12 @@ define float @f(float nofpclass(nan) %x, ptr dead_on_unwind writable align 8 %p)
 }
 ; nofpclass/dead_on_unwind/writable are dropped on pre-17 targets; align
 ; survives everywhere; mustprogress/willreturn postdate 5.0/7.0, so 14.0+
-; keep them. LLVM 18 knows all of the newer attributes natively.
+; keep them. LLVM 18 and 20 know all of the newer attributes natively.
 ; CHECK-V5: define float @f(float %x, {}* align 8 %p) {
 ; CHECK-V7: define float @f(float %x, {}* align 8 %p) {
 ; CHECK-V14: define float @f(float %x, {}* align 8 %p) #0 {
 ; CHECK-V14: attributes #0 = { mustprogress willreturn }
 ; CHECK-V18: define float @f(float nofpclass(nan) %x, ptr dead_on_unwind writable align 8 %p) #0 {
 ; CHECK-V18: attributes #0 = { mustprogress willreturn }
+; CHECK-V20: define float @f(float nofpclass(nan) %x, ptr dead_on_unwind writable align 8 %p) #0 {
+; CHECK-V20: attributes #0 = { mustprogress willreturn }
