@@ -1,6 +1,7 @@
-; VERSIONS: 18.0
+; VERSIONS: 18.0 20.0
 ; MIN-LLVM: 16
-; atomicrmw uinc_wrap/udec_wrap (LLVM 16) encode natively on the 18.0 target.
+; atomicrmw uinc_wrap/udec_wrap (LLVM 16) encode natively on the 18.0 and 20.0
+; targets.
 define i32 @f(ptr %p, i32 %x) {
   %a = atomicrmw uinc_wrap ptr %p, i32 %x seq_cst
   %b = atomicrmw udec_wrap ptr %p, i32 %x seq_cst

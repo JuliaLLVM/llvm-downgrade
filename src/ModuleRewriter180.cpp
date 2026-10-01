@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "DowngradeError.h"
+
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Function.h"
@@ -25,8 +27,9 @@ using namespace llvm;
 
 // LLVM made some pointer-typed intrinsics overloaded on the pointer type
 // after 18, mangling their names with a pointer suffix (va_start/va_end/
-// va_copy in 19, thread.pointer in 21; e.g. llvm.va_start.p0). LLVM 18 only
-// knows the unmangled names; rename them back. (stacksave/stackrestore were
+// va_copy in 19, thread.pointer in 21, returnaddress and clear_cache in 23;
+// e.g. llvm.va_start.p0). LLVM 18 only knows the unmangled names, which take
+// or return an address-space-0 pointer; rename them back. (stacksave/stackrestore were
 // already mangled in 17, so they keep their host names.)
 static bool renameLegacyIntrinsics(Module &M) {
   bool Changed = false;
@@ -39,8 +42,17 @@ static bool renameLegacyIntrinsics(Module &M) {
     case Intrinsic::vaend:          Name = "llvm.va_end";         break;
     case Intrinsic::vacopy:         Name = "llvm.va_copy";        break;
     case Intrinsic::thread_pointer: Name = "llvm.thread.pointer"; break;
+    case Intrinsic::returnaddress:  Name = "llvm.returnaddress";  break;
+    case Intrinsic::clear_cache:    Name = "llvm.clear_cache";    break;
     default: continue;
     }
+    auto InDefaultAS = [](Type *Ty) {
+      return !Ty->isPointerTy() || Ty->getPointerAddressSpace() == 0;
+    };
+    if (!InDefaultAS(F.getReturnType()) ||
+        !llvm::all_of(F.getFunctionType()->params(), InDefaultAS))
+      llvmdg::reportError(Twine(Name) + " on a pointer outside address space "
+                          "0 is not supported with LLVM 18");
     if (F.getName() != Name) {
       F.setName(Name);
       Changed = true;

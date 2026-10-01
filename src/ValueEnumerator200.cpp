@@ -1,4 +1,4 @@
-//===- ValueEnumerator150.cpp - Number values and types for bitcode writer ---===//
+//===- ValueEnumerator200.cpp - Number values and types for bitcode writer ---===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -6,11 +6,11 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file implements the ValueEnumerator150 class.
+// This file implements the ValueEnumerator200 class.
 //
 //===----------------------------------------------------------------------===//
 
-#include "ValueEnumerator150.h"
+#include "ValueEnumerator200.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/IR/Argument.h"
@@ -95,13 +95,13 @@ static void orderValue(const Value *V, OrderMap &OM) {
 }
 
 static OrderMap orderModule(const Module &M) {
-  // This needs to match the order used by ValueEnumerator150::ValueEnumerator150()
-  // and ValueEnumerator150::incorporateFunction().
+  // This needs to match the order used by ValueEnumerator200::ValueEnumerator200()
+  // and ValueEnumerator200::incorporateFunction().
   OrderMap OM;
 
   // Initializers of GlobalValues are processed in
   // BitcodeReader::ResolveGlobalAndAliasInits().  Match the order there rather
-  // than ValueEnumerator150, and match the code in predictValueUseListOrderImpl()
+  // than ValueEnumerator200, and match the code in predictValueUseListOrderImpl()
   // by giving IDs in reverse order.
   //
   // Since GlobalValues never reference each other directly (just through
@@ -125,7 +125,7 @@ static OrderMap orderModule(const Module &M) {
   for (const Function &F : M) {
     if (F.isDeclaration())
       continue;
-    // Here we need to match the union of ValueEnumerator150::incorporateFunction()
+    // Here we need to match the union of ValueEnumerator200::incorporateFunction()
     // and WriteFunction().  Basic blocks are implicitly declared before
     // anything else (by declaring their size).
     for (const BasicBlock &BB : F)
@@ -134,19 +134,27 @@ static OrderMap orderModule(const Module &M) {
     // Metadata used by instructions is decoded before the actual instructions,
     // so visit any constants used by it beforehand.
     for (const BasicBlock &BB : F)
-      for (const Instruction &I : BB)
-        for (const Value *V : I.operands()) {
-          if (const auto *MAV = dyn_cast<MetadataAsValue>(V)) {
-            if (const auto *VAM =
-                    dyn_cast<ValueAsMetadata>(MAV->getMetadata())) {
+      for (const Instruction &I : BB) {
+        auto OrderConstantFromMetadata = [&](Metadata *MD) {
+          if (const auto *VAM = dyn_cast<ValueAsMetadata>(MD)) {
+            orderConstantValue(VAM->getValue());
+          } else if (const auto *AL = dyn_cast<DIArgList>(MD)) {
+            for (const auto *VAM : AL->getArgs())
               orderConstantValue(VAM->getValue());
-            } else if (const auto *AL =
-                           dyn_cast<DIArgList>(MAV->getMetadata())) {
-              for (const auto *VAM : AL->getArgs())
-                orderConstantValue(VAM->getValue());
-            }
           }
+        };
+
+        for (DbgVariableRecord &DVR : filterDbgVars(I.getDbgRecordRange())) {
+          OrderConstantFromMetadata(DVR.getRawLocation());
+          if (DVR.isDbgAssign())
+            OrderConstantFromMetadata(DVR.getRawAddress());
         }
+
+        for (const Value *V : I.operands()) {
+          if (const auto *MAV = dyn_cast<MetadataAsValue>(V))
+            OrderConstantFromMetadata(MAV->getMetadata());
+        }
+      }
 
     for (const Argument &A : F.args())
       orderValue(&A, OM);
@@ -267,33 +275,39 @@ static UseListOrderStack predictUseListOrder(const Module &M) {
   // constants in the last Function they're used in.  Module-level constants
   // have already been visited above.
   for (const Function &F : llvm::reverse(M)) {
+    auto PredictValueOrderFromMetadata = [&](Metadata *MD) {
+      if (const auto *VAM = dyn_cast<ValueAsMetadata>(MD)) {
+        predictValueUseListOrder(VAM->getValue(), &F, OM, Stack);
+      } else if (const auto *AL = dyn_cast<DIArgList>(MD)) {
+        for (const auto *VAM : AL->getArgs())
+          predictValueUseListOrder(VAM->getValue(), &F, OM, Stack);
+      }
+    };
     if (F.isDeclaration())
       continue;
     for (const BasicBlock &BB : F)
       predictValueUseListOrder(&BB, &F, OM, Stack);
     for (const Argument &A : F.args())
       predictValueUseListOrder(&A, &F, OM, Stack);
-    for (const BasicBlock &BB : F)
+    for (const BasicBlock &BB : F) {
       for (const Instruction &I : BB) {
+        for (DbgVariableRecord &DVR : filterDbgVars(I.getDbgRecordRange())) {
+          PredictValueOrderFromMetadata(DVR.getRawLocation());
+          if (DVR.isDbgAssign())
+            PredictValueOrderFromMetadata(DVR.getRawAddress());
+        }
         for (const Value *Op : I.operands()) {
           if (isa<Constant>(*Op) || isa<InlineAsm>(*Op)) // Visit GlobalValues.
             predictValueUseListOrder(Op, &F, OM, Stack);
-          if (const auto *MAV = dyn_cast<MetadataAsValue>(Op)) {
-            if (const auto *VAM =
-                    dyn_cast<ValueAsMetadata>(MAV->getMetadata())) {
-              predictValueUseListOrder(VAM->getValue(), &F, OM, Stack);
-            } else if (const auto *AL =
-                           dyn_cast<DIArgList>(MAV->getMetadata())) {
-              for (const auto *VAM : AL->getArgs())
-                predictValueUseListOrder(VAM->getValue(), &F, OM, Stack);
-            }
-          }
+          if (const auto *MAV = dyn_cast<MetadataAsValue>(Op))
+            PredictValueOrderFromMetadata(MAV->getMetadata());
         }
         if (auto *SVI = dyn_cast<ShuffleVectorInst>(&I))
           predictValueUseListOrder(SVI->getShuffleMaskForBitcode(), &F, OM,
                                    Stack);
         predictValueUseListOrder(&I, &F, OM, Stack);
       }
+    }
   }
 
   // Visit globals last, since the module-level use-list block will be seen
@@ -325,7 +339,7 @@ static bool isIntOrIntVectorValue(const std::pair<const Value*, unsigned> &V) {
   return V.first->getType()->isIntOrIntVectorTy();
 }
 
-ValueEnumerator150::ValueEnumerator150(const Module &M,
+ValueEnumerator200::ValueEnumerator200(const Module &M,
                                  bool ShouldPreserveUseListOrder)
     : ShouldPreserveUseListOrder(ShouldPreserveUseListOrder) {
   if (ShouldPreserveUseListOrder)
@@ -382,7 +396,7 @@ ValueEnumerator150::ValueEnumerator150(const Module &M,
 
   // Enumerate the metadata type.
   //
-  // TODO: Move this to ValueEnumerator150::EnumerateOperandType() once bitcode
+  // TODO: Move this to ValueEnumerator200::EnumerateOperandType() once bitcode
   // only encodes the metadata type when it's used as a value.
   EnumerateType(Type::getMetadataTy(M.getContext()));
 
@@ -415,6 +429,41 @@ ValueEnumerator150::ValueEnumerator150(const Module &M,
 
     for (const BasicBlock &BB : F)
       for (const Instruction &I : BB) {
+        // Local metadata is enumerated during function-incorporation, but
+        // any ConstantAsMetadata arguments in a DIArgList should be examined
+        // now.
+        auto EnumerateNonLocalValuesFromMetadata = [&](Metadata *MD) {
+          assert(MD && "Metadata unexpectedly null");
+          if (const auto *AL = dyn_cast<DIArgList>(MD)) {
+            for (const auto *VAM : AL->getArgs()) {
+              if (isa<ConstantAsMetadata>(VAM))
+                EnumerateMetadata(&F, VAM);
+            }
+            return;
+          }
+
+          if (!isa<LocalAsMetadata>(MD))
+            EnumerateMetadata(&F, MD);
+        };
+
+        for (DbgRecord &DR : I.getDbgRecordRange()) {
+          if (DbgLabelRecord *DLR = dyn_cast<DbgLabelRecord>(&DR)) {
+            EnumerateMetadata(&F, DLR->getLabel());
+            EnumerateMetadata(&F, &*DLR->getDebugLoc());
+            continue;
+          }
+          // Enumerate non-local location metadata.
+          DbgVariableRecord &DVR = cast<DbgVariableRecord>(DR);
+          EnumerateNonLocalValuesFromMetadata(DVR.getRawLocation());
+          EnumerateMetadata(&F, DVR.getExpression());
+          EnumerateMetadata(&F, DVR.getVariable());
+          EnumerateMetadata(&F, &*DVR.getDebugLoc());
+          if (DVR.isDbgAssign()) {
+            EnumerateNonLocalValuesFromMetadata(DVR.getRawAddress());
+            EnumerateMetadata(&F, DVR.getAssignID());
+            EnumerateMetadata(&F, DVR.getAddressExpression());
+          }
+        }
         for (const Use &Op : I.operands()) {
           auto *MD = dyn_cast<MetadataAsValue>(&Op);
           if (!MD) {
@@ -422,19 +471,7 @@ ValueEnumerator150::ValueEnumerator150(const Module &M,
             continue;
           }
 
-          // Local metadata is enumerated during function-incorporation, but
-          // any ConstantAsMetadata arguments in a DIArgList should be examined
-          // now.
-          if (isa<LocalAsMetadata>(MD->getMetadata()))
-            continue;
-          if (auto *AL = dyn_cast<DIArgList>(MD->getMetadata())) {
-            for (auto *VAM : AL->getArgs())
-              if (isa<ConstantAsMetadata>(VAM))
-                EnumerateMetadata(&F, VAM);
-            continue;
-          }
-
-          EnumerateMetadata(&F, MD->getMetadata());
+          EnumerateNonLocalValuesFromMetadata(MD->getMetadata());
         }
         if (auto *SVI = dyn_cast<ShuffleVectorInst>(&I))
           EnumerateType(SVI->getShuffleMaskForBitcode()->getType());
@@ -469,23 +506,23 @@ ValueEnumerator150::ValueEnumerator150(const Module &M,
   organizeMetadata();
 }
 
-unsigned ValueEnumerator150::getInstructionID(const Instruction *Inst) const {
+unsigned ValueEnumerator200::getInstructionID(const Instruction *Inst) const {
   InstructionMapType::const_iterator I = InstructionMap.find(Inst);
   assert(I != InstructionMap.end() && "Instruction is not mapped!");
   return I->second;
 }
 
-unsigned ValueEnumerator150::getComdatID(const Comdat *C) const {
+unsigned ValueEnumerator200::getComdatID(const Comdat *C) const {
   unsigned ComdatID = Comdats.idFor(C);
   assert(ComdatID && "Comdat not found!");
   return ComdatID;
 }
 
-void ValueEnumerator150::setInstructionID(const Instruction *I) {
+void ValueEnumerator200::setInstructionID(const Instruction *I) {
   InstructionMap[I] = InstructionCount++;
 }
 
-unsigned ValueEnumerator150::getValueID(const Value *V) const {
+unsigned ValueEnumerator200::getValueID(const Value *V) const {
   if (auto *MD = dyn_cast<MetadataAsValue>(V))
     return getMetadataID(MD->getMetadata());
 
@@ -495,7 +532,7 @@ unsigned ValueEnumerator150::getValueID(const Value *V) const {
 }
 
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
-LLVM_DUMP_METHOD void ValueEnumerator150::dump() const {
+LLVM_DUMP_METHOD void ValueEnumerator200::dump() const {
   print(dbgs(), ValueMap, "Default");
   dbgs() << '\n';
   print(dbgs(), MetadataMap, "MetaData");
@@ -503,7 +540,7 @@ LLVM_DUMP_METHOD void ValueEnumerator150::dump() const {
 }
 #endif
 
-void ValueEnumerator150::print(raw_ostream &OS, const ValueMapType &Map,
+void ValueEnumerator200::print(raw_ostream &OS, const ValueMapType &Map,
                             const char *Name) const {
   OS << "Map Name: " << Name << "\n";
   OS << "Size: " << Map.size() << "\n";
@@ -530,7 +567,7 @@ void ValueEnumerator150::print(raw_ostream &OS, const ValueMapType &Map,
   }
 }
 
-void ValueEnumerator150::print(raw_ostream &OS, const MetadataMapType &Map,
+void ValueEnumerator200::print(raw_ostream &OS, const MetadataMapType &Map,
                             const char *Name) const {
   OS << "Map Name: " << Name << "\n";
   OS << "Size: " << Map.size() << "\n";
@@ -544,7 +581,7 @@ void ValueEnumerator150::print(raw_ostream &OS, const MetadataMapType &Map,
 }
 
 /// OptimizeConstants - Reorder constant pool for denser encoding.
-void ValueEnumerator150::OptimizeConstants(unsigned CstStart, unsigned CstEnd) {
+void ValueEnumerator200::OptimizeConstants(unsigned CstStart, unsigned CstEnd) {
   if (CstStart == CstEnd || CstStart+1 == CstEnd) return;
 
   if (ShouldPreserveUseListOrder)
@@ -575,7 +612,7 @@ void ValueEnumerator150::OptimizeConstants(unsigned CstStart, unsigned CstEnd) {
 
 /// EnumerateValueSymbolTable - Insert all of the values in the specified symbol
 /// table into the values table.
-void ValueEnumerator150::EnumerateValueSymbolTable(const ValueSymbolTable &VST) {
+void ValueEnumerator200::EnumerateValueSymbolTable(const ValueSymbolTable &VST) {
   for (ValueSymbolTable::const_iterator VI = VST.begin(), VE = VST.end();
        VI != VE; ++VI)
     EnumerateValue(VI->getValue());
@@ -583,35 +620,35 @@ void ValueEnumerator150::EnumerateValueSymbolTable(const ValueSymbolTable &VST) 
 
 /// Insert all of the values referenced by named metadata in the specified
 /// module.
-void ValueEnumerator150::EnumerateNamedMetadata(const Module &M) {
+void ValueEnumerator200::EnumerateNamedMetadata(const Module &M) {
   for (const auto &I : M.named_metadata())
     EnumerateNamedMDNode(&I);
 }
 
-void ValueEnumerator150::EnumerateNamedMDNode(const NamedMDNode *MD) {
-  for (unsigned i = 0, e = MD->getNumOperands(); i != e; ++i)
-    EnumerateMetadata(nullptr, MD->getOperand(i));
+void ValueEnumerator200::EnumerateNamedMDNode(const NamedMDNode *MD) {
+  for (const MDNode *N : MD->operands())
+    EnumerateMetadata(nullptr, N);
 }
 
-unsigned ValueEnumerator150::getMetadataFunctionID(const Function *F) const {
+unsigned ValueEnumerator200::getMetadataFunctionID(const Function *F) const {
   return F ? getValueID(F) + 1 : 0;
 }
 
-void ValueEnumerator150::EnumerateMetadata(const Function *F, const Metadata *MD) {
+void ValueEnumerator200::EnumerateMetadata(const Function *F, const Metadata *MD) {
   EnumerateMetadata(getMetadataFunctionID(F), MD);
 }
 
-void ValueEnumerator150::EnumerateFunctionLocalMetadata(
+void ValueEnumerator200::EnumerateFunctionLocalMetadata(
     const Function &F, const LocalAsMetadata *Local) {
   EnumerateFunctionLocalMetadata(getMetadataFunctionID(&F), Local);
 }
 
-void ValueEnumerator150::EnumerateFunctionLocalListMetadata(
+void ValueEnumerator200::EnumerateFunctionLocalListMetadata(
     const Function &F, const DIArgList *ArgList) {
   EnumerateFunctionLocalListMetadata(getMetadataFunctionID(&F), ArgList);
 }
 
-void ValueEnumerator150::dropFunctionFromMetadata(
+void ValueEnumerator200::dropFunctionFromMetadata(
     MetadataMapType::value_type &FirstMD) {
   SmallVector<const MDNode *, 64> Worklist;
   auto push = [&Worklist](MetadataMapType::value_type &MD) {
@@ -641,7 +678,7 @@ void ValueEnumerator150::dropFunctionFromMetadata(
     }
 }
 
-void ValueEnumerator150::EnumerateMetadata(unsigned F, const Metadata *MD) {
+void ValueEnumerator200::EnumerateMetadata(unsigned F, const Metadata *MD) {
   // It's vital for reader efficiency that uniqued subgraphs are done in
   // post-order; it's expensive when their operands have forward references.
   // If a distinct node is referenced from a uniqued node, it'll be delayed
@@ -689,7 +726,7 @@ void ValueEnumerator150::EnumerateMetadata(unsigned F, const Metadata *MD) {
   }
 }
 
-const MDNode *ValueEnumerator150::enumerateMetadataImpl(unsigned F, const Metadata *MD) {
+const MDNode *ValueEnumerator200::enumerateMetadataImpl(unsigned F, const Metadata *MD) {
   if (!MD)
     return nullptr;
 
@@ -723,7 +760,7 @@ const MDNode *ValueEnumerator150::enumerateMetadataImpl(unsigned F, const Metada
 
 /// EnumerateFunctionLocalMetadata - Incorporate function-local metadata
 /// information reachable from the metadata.
-void ValueEnumerator150::EnumerateFunctionLocalMetadata(
+void ValueEnumerator200::EnumerateFunctionLocalMetadata(
     unsigned F, const LocalAsMetadata *Local) {
   assert(F && "Expected a function");
 
@@ -743,7 +780,7 @@ void ValueEnumerator150::EnumerateFunctionLocalMetadata(
 
 /// EnumerateFunctionLocalListMetadata - Incorporate function-local metadata
 /// information reachable from the metadata.
-void ValueEnumerator150::EnumerateFunctionLocalListMetadata(
+void ValueEnumerator200::EnumerateFunctionLocalListMetadata(
     unsigned F, const DIArgList *ArgList) {
   assert(F && "Expected a function");
 
@@ -790,7 +827,7 @@ static unsigned getMetadataTypeOrder(const Metadata *MD) {
   return N->isDistinct() ? 2 : 3;
 }
 
-void ValueEnumerator150::organizeMetadata() {
+void ValueEnumerator200::organizeMetadata() {
   assert(MetadataMap.size() == MDs.size() &&
          "Metadata map and vector out of sync");
 
@@ -860,7 +897,7 @@ void ValueEnumerator150::organizeMetadata() {
   FunctionMDInfo[PrevF] = R;
 }
 
-void ValueEnumerator150::incorporateFunctionMetadata(const Function &F) {
+void ValueEnumerator200::incorporateFunctionMetadata(const Function &F) {
   NumModuleMDs = MDs.size();
 
   auto R = FunctionMDInfo.lookup(getValueID(&F) + 1);
@@ -869,7 +906,7 @@ void ValueEnumerator150::incorporateFunctionMetadata(const Function &F) {
              FunctionMDs.begin() + R.Last);
 }
 
-void ValueEnumerator150::EnumerateValue(const Value *V) {
+void ValueEnumerator200::EnumerateValue(const Value *V) {
   assert(!V->getType()->isVoidTy() && "Can't insert void values!");
   assert(!isa<MetadataAsValue>(V) && "EnumerateValue doesn't handle Metadata!");
 
@@ -900,10 +937,9 @@ void ValueEnumerator150::EnumerateValue(const Value *V) {
       // itself.  This makes it more likely that we can avoid forward references
       // in the reader.  We know that there can be no cycles in the constants
       // graph that don't go through a global variable.
-      for (User::const_op_iterator I = C->op_begin(), E = C->op_end();
-           I != E; ++I)
-        if (!isa<BasicBlock>(*I)) // Don't enumerate BB operand to BlockAddress.
-          EnumerateValue(*I);
+      for (const Use &U : C->operands())
+        if (!isa<BasicBlock>(U)) // Don't enumerate BB operand to BlockAddress.
+          EnumerateValue(U);
       if (auto *CE = dyn_cast<ConstantExpr>(C)) {
         if (CE->getOpcode() == Instruction::ShuffleVector)
           EnumerateValue(CE->getShuffleMaskForBitcode());
@@ -925,7 +961,7 @@ void ValueEnumerator150::EnumerateValue(const Value *V) {
 }
 
 
-void ValueEnumerator150::EnumerateType(Type *Ty) {
+void ValueEnumerator200::EnumerateType(Type *Ty) {
   unsigned *TypeID = &TypeMap[Ty];
 
   // We've already seen this type.
@@ -963,7 +999,7 @@ void ValueEnumerator150::EnumerateType(Type *Ty) {
 
 // Enumerate the types for the specified value.  If the value is a constant,
 // walk through it, enumerating the types of the constant.
-void ValueEnumerator150::EnumerateOperandType(const Value *V) {
+void ValueEnumerator200::EnumerateOperandType(const Value *V) {
   EnumerateType(V->getType());
 
   assert(!isa<MetadataAsValue>(V) && "Unexpected metadata operand");
@@ -995,11 +1031,11 @@ void ValueEnumerator150::EnumerateOperandType(const Value *V) {
   }
 }
 
-// Defined in BitcodeWriter150.cpp; counts how many attribute entries the
+// Defined in BitcodeWriter200.cpp; counts how many attribute entries the
 // writer will emit for AS, so unencodable groups can be dropped consistently.
-extern unsigned countEncodableAttrs150(const AttributeSet &AS);
+extern unsigned countEncodableAttrs200(const AttributeSet &AS);
 
-void ValueEnumerator150::EnumerateAttributes(AttributeList PAL) {
+void ValueEnumerator200::EnumerateAttributes(AttributeList PAL) {
   if (PAL.isEmpty()) return;  // null is always 0.
 
   // Do a lookup.
@@ -1016,12 +1052,11 @@ void ValueEnumerator150::EnumerateAttributes(AttributeList PAL) {
     if (!AS.hasAttributes())
       continue;
     // Skip attribute sets for which the writer would emit an empty group
-    // record (which the LLVM 15 reader rejects), e.g. a lone memory(readwrite)
-    // or captures(...) that decomposes to nothing. countEncodableAttrs150 is
-    // the counting mode of the writer's own encoding function, so the two
-    // cannot drift apart.
+    // record (which the LLVM 20 reader rejects), e.g. a lone attribute that
+    // postdates LLVM 20. countEncodableAttrs200 is the counting mode
+    // of the writer's own encoding function, so the two cannot drift apart.
     auto AS_index = i;
-    if (countEncodableAttrs150(AS) == 0) {
+    if (countEncodableAttrs200(AS) == 0) {
       AS_index = invalid_attribute_group_id;
     }
     IndexAndAttrSet Pair = {AS_index, AS};
@@ -1038,7 +1073,7 @@ void ValueEnumerator150::EnumerateAttributes(AttributeList PAL) {
   }
 }
 
-void ValueEnumerator150::incorporateFunction(const Function &F) {
+void ValueEnumerator200::incorporateFunction(const Function &F) {
   InstructionCount = 0;
   NumModuleValues = Values.size();
 
@@ -1089,39 +1124,55 @@ void ValueEnumerator150::incorporateFunction(const Function &F) {
 
   SmallVector<LocalAsMetadata *, 8> FnLocalMDVector;
   SmallVector<DIArgList *, 8> ArgListMDVector;
+
+  auto AddFnLocalMetadata = [&](Metadata *MD) {
+    if (!MD)
+      return;
+    if (auto *Local = dyn_cast<LocalAsMetadata>(MD)) {
+      // Enumerate metadata after the instructions they might refer to.
+      FnLocalMDVector.push_back(Local);
+    } else if (auto *ArgList = dyn_cast<DIArgList>(MD)) {
+      ArgListMDVector.push_back(ArgList);
+      for (ValueAsMetadata *VMD : ArgList->getArgs()) {
+        if (auto *Local = dyn_cast<LocalAsMetadata>(VMD)) {
+          // Enumerate metadata after the instructions they might refer
+          // to.
+          FnLocalMDVector.push_back(Local);
+        }
+      }
+    }
+  };
+
   // Add all of the instructions.
   for (const BasicBlock &BB : F) {
     for (const Instruction &I : BB) {
       for (const Use &OI : I.operands()) {
-        if (auto *MD = dyn_cast<MetadataAsValue>(&OI)) {
-          if (auto *Local = dyn_cast<LocalAsMetadata>(MD->getMetadata())) {
-            // Enumerate metadata after the instructions they might refer to.
-            FnLocalMDVector.push_back(Local);
-          } else if (auto *ArgList = dyn_cast<DIArgList>(MD->getMetadata())) {
-            ArgListMDVector.push_back(ArgList);
-            for (ValueAsMetadata *VMD : ArgList->getArgs()) {
-              if (auto *Local = dyn_cast<LocalAsMetadata>(VMD)) {
-                // Enumerate metadata after the instructions they might refer
-                // to.
-                FnLocalMDVector.push_back(Local);
-              }
-            }
-          }
+        if (auto *MD = dyn_cast<MetadataAsValue>(&OI))
+          AddFnLocalMetadata(MD->getMetadata());
+      }
+      /// RemoveDIs: Add non-instruction function-local metadata uses.
+      for (DbgVariableRecord &DVR : filterDbgVars(I.getDbgRecordRange())) {
+        assert(DVR.getRawLocation() &&
+               "DbgVariableRecord location unexpectedly null");
+        AddFnLocalMetadata(DVR.getRawLocation());
+        if (DVR.isDbgAssign()) {
+          assert(DVR.getRawAddress() &&
+                 "DbgVariableRecord location unexpectedly null");
+          AddFnLocalMetadata(DVR.getRawAddress());
         }
       }
-
       if (!I.getType()->isVoidTy())
         EnumerateValue(&I);
     }
   }
 
   // Add all of the function-local metadata.
-  for (unsigned i = 0, e = FnLocalMDVector.size(); i != e; ++i) {
+  for (const LocalAsMetadata *Local : FnLocalMDVector) {
     // At this point, every local values have been incorporated, we shouldn't
     // have a metadata operand that references a value that hasn't been seen.
-    assert(ValueMap.count(FnLocalMDVector[i]->getValue()) &&
+    assert(ValueMap.count(Local->getValue()) &&
            "Missing value for metadata operand");
-    EnumerateFunctionLocalMetadata(F, FnLocalMDVector[i]);
+    EnumerateFunctionLocalMetadata(F, Local);
   }
   // DIArgList entries must come after function-local metadata, as it is not
   // possible to forward-reference them.
@@ -1129,12 +1180,12 @@ void ValueEnumerator150::incorporateFunction(const Function &F) {
     EnumerateFunctionLocalListMetadata(F, ArgList);
 }
 
-void ValueEnumerator150::purgeFunction() {
+void ValueEnumerator200::purgeFunction() {
   /// Remove purged values from the ValueMap.
-  for (unsigned i = NumModuleValues, e = Values.size(); i != e; ++i)
-    ValueMap.erase(Values[i].first);
-  for (unsigned i = NumModuleMDs, e = MDs.size(); i != e; ++i)
-    MetadataMap.erase(MDs[i]);
+  for (const auto &V : llvm::drop_begin(Values, NumModuleValues))
+    ValueMap.erase(V.first);
+  for (const Metadata *MD : llvm::drop_begin(MDs, NumModuleMDs))
+    MetadataMap.erase(MD);
   for (const BasicBlock *BB : BasicBlocks)
     ValueMap.erase(BB);
 
@@ -1154,7 +1205,7 @@ static void IncorporateFunctionInfoGlobalBBIDs(const Function *F,
 /// getGlobalBasicBlockID - This returns the function-specific ID for the
 /// specified basic block.  This is relatively expensive information, so it
 /// should only be used by rare constructs such as address-of-label.
-unsigned ValueEnumerator150::getGlobalBasicBlockID(const BasicBlock *BB) const {
+unsigned ValueEnumerator200::getGlobalBasicBlockID(const BasicBlock *BB) const {
   unsigned &Idx = GlobalBasicBlockIDs[BB];
   if (Idx != 0)
     return Idx-1;
@@ -1163,6 +1214,6 @@ unsigned ValueEnumerator150::getGlobalBasicBlockID(const BasicBlock *BB) const {
   return getGlobalBasicBlockID(BB);
 }
 
-uint64_t ValueEnumerator150::computeBitsRequiredForTypeIndicies() const {
+uint64_t ValueEnumerator200::computeBitsRequiredForTypeIndices() const {
   return Log2_32_Ceil(getTypes().size() + 1);
 }

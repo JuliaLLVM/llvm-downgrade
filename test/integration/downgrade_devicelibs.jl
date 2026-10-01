@@ -1,10 +1,10 @@
 # Test that we can successfully downgrade the ROCm device libraries shipped by
-# the latest AMDGPU_LLVM_Backend_jll to the LLVM versions we care about (14, 15,
-# and 18)
+# the latest AMDGPU_LLVM_Backend_jll to the LLVM versions we care about (14, 18,
+# and 20)
 
 using Test, Pkg
 
-const VERSIONS = ["14.0", "15.0", "18.0"]
+const VERSIONS = ["14.0", "18.0", "20.0"]
 
 function parse_args(args)
     iseven(length(args)) || error("flags and values must come in pairs: $args")

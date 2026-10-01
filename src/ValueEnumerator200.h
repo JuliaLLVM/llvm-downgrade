@@ -1,4 +1,4 @@
-//===- Bitcode/Writer/ValueEnumerator.h - Number values ---------*- C++ -*-===//
+//===- Bitcode/Writer/ValueEnumerator200.h - Number values ---------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -10,8 +10,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_LIB_BITCODE_LEGACYWRITER_VALUEENUMERATOR150_H
-#define LLVM_LIB_BITCODE_LEGACYWRITER_VALUEENUMERATOR150_H
+#ifndef LLVM_LIB_BITCODE_LEGACYWRITER_VALUEENUMERATOR200_H
+#define LLVM_LIB_BITCODE_LEGACYWRITER_VALUEENUMERATOR200_H
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
@@ -40,7 +40,7 @@ class Type;
 class Value;
 class ValueSymbolTable;
 
-class ValueEnumerator150 {
+class ValueEnumerator200 {
 public:
   using TypeList = std::vector<Type *>;
 
@@ -138,9 +138,9 @@ private:
   unsigned FirstInstID;
 
 public:
-  ValueEnumerator150(const Module &M, bool ShouldPreserveUseListOrder);
-  ValueEnumerator150(const ValueEnumerator150 &) = delete;
-  ValueEnumerator150 &operator=(const ValueEnumerator150 &) = delete;
+  ValueEnumerator200(const Module &M, bool ShouldPreserveUseListOrder);
+  ValueEnumerator200(const ValueEnumerator200 &) = delete;
+  ValueEnumerator200 &operator=(const ValueEnumerator200 &) = delete;
 
   //! signals that an attribute group id is invalid / should not be used
   static constexpr const uint32_t invalid_attribute_group_id = 0x7FFF'FFFFu;
@@ -168,7 +168,7 @@ public:
 
   unsigned getTypeID(Type *T) const {
     TypeMapType::const_iterator I = TypeMap.find(T);
-    assert(I != TypeMap.end() && "Type not in ValueEnumerator150!");
+    assert(I != TypeMap.end() && "Type not in ValueEnumerator200!");
     return I->second-1;
   }
 
@@ -178,7 +178,7 @@ public:
   unsigned getAttributeListID(AttributeList PAL) const {
     if (PAL.isEmpty()) return 0;  // Null maps to zero.
     AttributeListMapType::const_iterator I = AttributeListMap.find(PAL);
-    assert(I != AttributeListMap.end() && "Attribute not in ValueEnumerator150!");
+    assert(I != AttributeListMap.end() && "Attribute not in ValueEnumerator200!");
     return I->second;
   }
 
@@ -187,7 +187,7 @@ public:
       return 0; // Null maps to zero.
     AttributeGroupMapType::const_iterator I = AttributeGroupMap.find(Group);
     // A group that only exists under invalid_attribute_group_id (because it
-    // has no LLVM 15 encoding) misses here; tell the caller to drop it.
+    // has no LLVM 20 encoding) misses here; tell the caller to drop it.
     if (I == AttributeGroupMap.end()) {
       return invalid_attribute_group_id;
     }
@@ -237,11 +237,11 @@ public:
   unsigned getGlobalBasicBlockID(const BasicBlock *BB) const;
 
   /// incorporateFunction/purgeFunction - If you'd like to deal with a function,
-  /// use these two methods to get its data into the ValueEnumerator150!
+  /// use these two methods to get its data into the ValueEnumerator200!
   void incorporateFunction(const Function &F);
 
   void purgeFunction();
-  uint64_t computeBitsRequiredForTypeIndicies() const;
+  uint64_t computeBitsRequiredForTypeIndices() const;
 
 private:
   void OptimizeConstants(unsigned CstStart, unsigned CstEnd);
@@ -309,4 +309,4 @@ private:
 
 } // end namespace llvm
 
-#endif // LLVM_LIB_BITCODE_LEGACYWRITER_VALUEENUMERATOR150_H
+#endif // LLVM_LIB_BITCODE_LEGACYWRITER_VALUEENUMERATOR200_H

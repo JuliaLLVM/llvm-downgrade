@@ -801,6 +801,10 @@ static std::string legacyIntrinsicName(const Function &F,
     return "llvm.stackrestore";
   case Intrinsic::thread_pointer:
     return "llvm.thread.pointer";
+  case Intrinsic::returnaddress:
+    return "llvm.returnaddress";
+  case Intrinsic::clear_cache:
+    return "llvm.clear_cache";
   case Intrinsic::prefetch:
     // prefetch gained its pointer mangling in LLVM 10
     return TargetMajor >= 10 ? "llvm.prefetch" + ptrSuffix(0)
@@ -886,6 +890,24 @@ bool PointerRewriter::prepareIntrinsics(Module &M, unsigned TargetMajor) {
     if (!F.isIntrinsic())
       continue;
     std::string Name = legacyIntrinsicName(F, TargetMajor);
+    switch (F.getIntrinsicID()) {
+    case Intrinsic::thread_pointer:
+    case Intrinsic::returnaddress:
+    case Intrinsic::clear_cache: {
+      // The legacy forms take or return an address-space-0 pointer.
+      auto InDefaultAS = [](Type *Ty) {
+        return !Ty->isPointerTy() || Ty->getPointerAddressSpace() == 0;
+      };
+      if (!InDefaultAS(F.getReturnType()) ||
+          !llvm::all_of(F.getFunctionType()->params(), InDefaultAS))
+        llvmdg::reportError(Twine(Name) + " on a pointer outside address "
+                            "space 0 is not supported with LLVM " +
+                            Twine(TargetMajor));
+      break;
+    }
+    default:
+      break;
+    }
     if (!Name.empty() && F.getName() != Name) {
       F.setName(Name);
       Changed = true;

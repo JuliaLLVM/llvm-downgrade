@@ -856,6 +856,22 @@ static uint64_t getAttrKindEncoding180(Attribute::AttrKind Kind) {
   }
 }
 
+// LLVM 18 knows three memory locations, packed as two ModRef bits each: argmem,
+// inaccessiblemem and other memory. LLVM 21 split errnomem out of other memory
+// and LLVM 22 added target_mem0/1, which shifts the fields of the host's
+// encoding. Fold the new locations back into the ones that used to cover them;
+// the host reader applies the inverse when it upgrades such old encodings.
+static uint64_t encodeLegacyMemoryEffects(MemoryEffects ME) {
+  ModRefInfo ArgMem = ME.getModRef(IRMemLocation::ArgMem);
+  ModRefInfo InaccessibleMem = ME.getModRef(IRMemLocation::InaccessibleMem) |
+                               ME.getModRef(IRMemLocation::TargetMem0) |
+                               ME.getModRef(IRMemLocation::TargetMem1);
+  ModRefInfo OtherMem = ME.getModRef(IRMemLocation::Other) |
+                        ME.getModRef(IRMemLocation::ErrnoMem);
+  return uint64_t(ArgMem) | uint64_t(InaccessibleMem) << 2 |
+         uint64_t(OtherMem) << 4;
+}
+
 // Append the LLVM 18 encoding of Attr to Record, returning how many attribute
 // entries were emitted. A null Record only counts (VE may then be null too).
 // ValueEnumerator180 uses the counting mode (via countEncodableAttrs180) to
@@ -877,6 +893,12 @@ unsigned encodeAttribute180(const Attribute &Attr,
     if (!capturesNothing(Attr.getCaptureInfo()))
       return 0;
     Emit({0, bitc::ATTR_KIND_NO_CAPTURE});
+    return 1;
+  }
+
+  if (Attr.hasAttribute(Attribute::Memory)) {
+    Emit({1, bitc::ATTR_KIND_MEMORY,
+          encodeLegacyMemoryEffects(Attr.getMemoryEffects())});
     return 1;
   }
 
@@ -1824,53 +1846,17 @@ void ModuleBitcodeWriter180::writeDIBasicType(const DIBasicType *N,
 void ModuleBitcodeWriter180::writeDIFixedPointType(
     const DIFixedPointType *N, SmallVectorImpl<uint64_t> &Record,
     unsigned Abbrev) {
-  const unsigned SizeIsMetadata = 0x2;
-  Record.push_back(SizeIsMetadata | (unsigned)N->isDistinct());
-  Record.push_back(N->getTag());
-  Record.push_back(VE.getMetadataOrNullID(N->getRawName()));
-  Record.push_back(VE.getMetadataOrNullID(N->getRawSizeInBits()));
-  Record.push_back(N->getAlignInBits());
-  Record.push_back(N->getEncoding());
-  Record.push_back(N->getFlags());
-  Record.push_back(N->getKind());
-  Record.push_back(N->getFactorRaw());
-
-  auto WriteWideInt = [&](const APInt &Value) {
-    // Write an encoded word that holds the number of active words and
-    // the number of bits.
-    uint64_t NumWords = Value.getActiveWords();
-    uint64_t Encoded = (NumWords << 32) | Value.getBitWidth();
-    Record.push_back(Encoded);
-    emitWideAPInt(Record, Value);
-  };
-
-  WriteWideInt(N->getNumeratorRaw());
-  WriteWideInt(N->getDenominatorRaw());
-
-  Stream.EmitRecord(bitc::METADATA_FIXED_POINT_TYPE, Record, Abbrev);
-  Record.clear();
+  // The METADATA_FIXED_POINT_TYPE record code postdates LLVM 18; its reader
+  // crashes on it. Reject rather than emit invalid bitcode.
+  llvmdg::reportError("DIFixedPointType is not supported with LLVM 18");
 }
 
 void ModuleBitcodeWriter180::writeDISubrangeType(
     const DISubrangeType *N, SmallVectorImpl<uint64_t> &Record,
     unsigned Abbrev) {
-  const unsigned SizeIsMetadata = 0x2;
-  Record.push_back(SizeIsMetadata | (unsigned)N->isDistinct());
-  Record.push_back(VE.getMetadataOrNullID(N->getRawName()));
-  Record.push_back(VE.getMetadataOrNullID(N->getFile()));
-  Record.push_back(N->getLine());
-  Record.push_back(VE.getMetadataOrNullID(N->getScope()));
-  Record.push_back(VE.getMetadataOrNullID(N->getRawSizeInBits()));
-  Record.push_back(N->getAlignInBits());
-  Record.push_back(N->getFlags());
-  Record.push_back(VE.getMetadataOrNullID(N->getBaseType()));
-  Record.push_back(VE.getMetadataOrNullID(N->getRawLowerBound()));
-  Record.push_back(VE.getMetadataOrNullID(N->getRawUpperBound()));
-  Record.push_back(VE.getMetadataOrNullID(N->getRawStride()));
-  Record.push_back(VE.getMetadataOrNullID(N->getRawBias()));
-
-  Stream.EmitRecord(bitc::METADATA_SUBRANGE_TYPE, Record, Abbrev);
-  Record.clear();
+  // The METADATA_SUBRANGE_TYPE record code postdates LLVM 18; its reader
+  // crashes on it. Reject rather than emit invalid bitcode.
+  llvmdg::reportError("DISubrangeType is not supported with LLVM 18");
 }
 
 void ModuleBitcodeWriter180::writeDIStringType(const DIStringType *N,
