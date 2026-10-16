@@ -2724,6 +2724,19 @@ void ModuleBitcodeWriter180::writeConstants(unsigned FirstVal, unsigned LastVal,
       Code = bitc::CST_CODE_POISON;
     } else if (isa<UndefValue>(C)) {
       Code = bitc::CST_CODE_UNDEF;
+    } else if (isa<ConstantInt, ConstantFP>(C) && C->getType()->isVectorTy()) {
+      // Since LLVM 23 every FP splat is a vector ConstantFP (integer splats
+      // can be ConstantInt too). Readers before LLVM 19 only accept scalar
+      // INTEGER/FLOAT records, so spell the splat out as a data array.
+      auto *VTy = dyn_cast<FixedVectorType>(C->getType());
+      if (!VTy || !ConstantDataSequential::isElementTypeCompatible(
+                      VTy->getElementType()))
+        llvmdg::reportError("unsupported vector splat constant");
+      APInt Elt = isa<ConstantInt>(C)
+                      ? cast<ConstantInt>(C)->getValue()
+                      : cast<ConstantFP>(C)->getValueAPF().bitcastToAPInt();
+      Code = bitc::CST_CODE_DATA;
+      Record.append(VTy->getNumElements(), Elt.getZExtValue());
     } else if (const ConstantInt *IV = dyn_cast<ConstantInt>(C)) {
       if (IV->getBitWidth() <= 64) {
         uint64_t V = IV->getSExtValue();
@@ -2753,7 +2766,7 @@ void ModuleBitcodeWriter180::writeConstants(unsigned FirstVal, unsigned LastVal,
         Record.push_back(p[0]);
         Record.push_back(p[1]);
       } else {
-        assert(0 && "Unknown FP type!");
+        llvmdg::reportError("unsupported floating-point constant type");
       }
     } else if (isa<ConstantDataSequential>(C) &&
                cast<ConstantDataSequential>(C)->isString()) {
