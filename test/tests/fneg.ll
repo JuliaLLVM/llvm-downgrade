@@ -13,3 +13,11 @@ define float @g(float %x) {
 ; CHECK: fsub float -0.000000e+00, %x
 ; fast-math flags survive the lowering
 ; CHECK: fsub fast float -0.000000e+00, %x
+
+; the -0.0 operand of a vector lowering is a splat constant
+define <2 x float> @v(<2 x float> %x) {
+  %n = fneg <2 x float> %x
+  ret <2 x float> %n
+}
+
+; CHECK: fsub <2 x float> <float -0.000000e+00, float -0.000000e+00>, %x
