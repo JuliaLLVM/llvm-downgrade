@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "DowngradeError.h"
+#include "HostLowering.h"
 
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/DebugProgramInstruction.h"
@@ -96,7 +97,7 @@ bool BitcodeWriter200::prepareModule(Module &M) {
   // LLVM 20 is opaque-pointer-only and supports target extension types,
   // debug records and all attribute representations natively. The writer
   // drops attribute kinds that postdate it.
-  bool Changed = false;
+  bool Changed = llvmdg::lowerHostConstructs(M, 20);
   Changed |= renameLegacyIntrinsics(M);
   Changed |= dropLifetimeIntrinsics(M);
   Changed |= dropDeclareValueRecords(M);

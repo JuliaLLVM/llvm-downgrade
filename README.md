@@ -128,6 +128,7 @@ it.
 
 Constructs with no reasonable legacy representation return an error: exception handling (`invoke`, 5.0/7.0
 targets), `callbr`, atomicrmw operations newer than the target format,
+`elementwise` atomicrmw on integer or pointer vectors,
 vector-of-pointer GEPs, unwinding inline asm (5.0/7.0), scalable vectors /
 bfloat / AMX (5.0/7.0), target extension types, pointer-typed intrinsics
 without a known typed signature (5.0/7.0), `DIEnumerator` values wider than 64
@@ -136,7 +137,8 @@ bits (5.0/7.0), `DIAssignID` (14.0), and `DIFixedPointType`/`DISubrangeType` (14
 Some information is dropped, always soundly: attribute kinds that postdate the
 target (`nofpclass`, `range`, partial `captures`, ...), poison-generating
 instruction flags (`disjoint`, `nneg`, `samesign`, `nuw`/`nusw` on GEP and
-`trunc`), `llvm.lifetime` markers on the pre-22 targets (their modern form
+`trunc`), the `elementwise` modifier on floating-point atomicrmw (whole-value
+atomicity is stronger), `llvm.lifetime` markers on the pre-22 targets (their modern form
 has no older signature), and, on the pre-20 targets, `#dbg_value`/`#dbg_declare`
 variable-location records (those writers predate debug records, and modern
 LLVM has no intrinsic form left to lower them to; the 20.0 and 22.0 targets keep

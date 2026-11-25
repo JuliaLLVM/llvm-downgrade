@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "DowngradeError.h"
+#include "HostLowering.h"
 
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/Attributes.h"
@@ -108,7 +109,7 @@ bool BitcodeWriter180::prepareModule(Module &M) {
   // LLVM 18 is opaque-pointer-only and supports target extension types,
   // memory(...) and DIAssignID natively, so only attributes that postdate it
   // and the vararg intrinsic names need rewriting.
-  bool Changed = false;
+  bool Changed = llvmdg::lowerHostConstructs(M, 18);
   LLVMContext &C = M.getContext();
   for (Function &F : M) {
     F.setAttributes(stripUnsupportedAttrs(C, F.getAttributes(), Changed));

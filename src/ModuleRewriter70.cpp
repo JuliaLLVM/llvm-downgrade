@@ -11,6 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "HostLowering.h"
+
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "PointerRewriter.h"
 #include "llvm/IR/IRBuilder.h"
@@ -65,7 +67,8 @@ static bool replaceFNeg(Module &M) {
 }
 
 bool BitcodeWriter70::prepareModule(Module &M) {
-  bool Changed = removeFreeze(M);
+  bool Changed = llvmdg::lowerHostConstructs(M, 7);
+  Changed |= removeFreeze(M);
   Changed |= replaceFNeg(M);
 
   // Lower intrinsics to their legacy names/signatures, and reject any

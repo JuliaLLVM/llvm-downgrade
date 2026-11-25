@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "DowngradeError.h"
+#include "HostLowering.h"
 
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/Function.h"
@@ -54,7 +55,7 @@ bool BitcodeWriter220::prepareModule(Module &M) {
   // LLVM 22 supports lifetime markers without a size, #dbg_declare_value
   // records and all attribute representations natively. The writer drops
   // attribute kinds that postdate it.
-  bool Changed = false;
+  bool Changed = llvmdg::lowerHostConstructs(M, 22);
   Changed |= renameLegacyIntrinsics(M);
   return Changed;
 }
