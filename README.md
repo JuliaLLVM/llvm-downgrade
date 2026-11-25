@@ -128,7 +128,8 @@ it.
 
 Constructs with no reasonable legacy representation return an error: exception handling (`invoke`, 5.0/7.0
 targets), `callbr`, atomicrmw operations newer than the target format,
-`elementwise` atomicrmw on integer or pointer vectors,
+`elementwise` atomicrmw on integer or pointer vectors, atomicrmw on vectors
+(14.0, 18.0),
 vector-of-pointer GEPs, unwinding inline asm (5.0/7.0), scalable vectors /
 bfloat / AMX (5.0/7.0), target extension types, pointer-typed intrinsics
 without a known typed signature (5.0/7.0), `DIEnumerator` values wider than 64
