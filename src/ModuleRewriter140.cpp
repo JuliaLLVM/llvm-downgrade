@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "HostLowering.h"
+
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "PointerRewriter.h"
 #include "llvm/IR/Attributes.h"
@@ -50,7 +52,7 @@ static AttributeList stripUnsupportedAttrs(LLVMContext &C, AttributeList AL,
 bool BitcodeWriter140::prepareModule(Module &M) {
   // Unlike the 5.0/7.0 targets, LLVM 14 natively supports freeze, fneg and the
   // bfloat type, so none of those need to be rewritten.
-  bool Changed = false;
+  bool Changed = llvmdg::lowerHostConstructs(M, 14);
   LLVMContext &C = M.getContext();
   for (Function &F : M) {
     F.setAttributes(stripUnsupportedAttrs(C, F.getAttributes(), Changed));

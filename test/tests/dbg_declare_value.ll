@@ -1,7 +1,7 @@
-; VERSIONS: 20.0
+; VERSIONS: 20.0 22.0
 ; MIN-LLVM: 22
 ; #dbg_declare_value (LLVM 22) has no LLVM 20 record kind; it is dropped, while
-; the other debug records in the function are kept.
+; the other debug records in the function are kept. LLVM 22 keeps it.
 define void @f(ptr %p, i32 %x) !dbg !5 {
     #dbg_declare_value(ptr %p, !8, !DIExpression(), !9)
     #dbg_value(i32 %x, !11, !DIExpression(), !9)
@@ -22,7 +22,8 @@ define void @f(ptr %p, i32 %x) !dbg !5 {
 !11 = !DILocalVariable(name: "x", scope: !5, file: !1, line: 1, type: !10)
 
 ; CHECK: define void @f(
-; CHECK-NOT: #dbg_declare
+; CHECK-V20-NOT: #dbg_declare
+; CHECK-V22: #dbg_declare_value(ptr %p,
 ; CHECK: #dbg_value(i32 %x,
-; CHECK-NOT: #dbg_declare
+; CHECK-V20-NOT: #dbg_declare
 ; CHECK: ret void

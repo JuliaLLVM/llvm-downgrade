@@ -1,9 +1,9 @@
 ; VERSIONS: 5.0 7.0 14.0 18.0 20.0
 ; MIN-LLVM: 22
 ; LLVM 22 dropped the size argument of llvm.lifetime.start/end, so the modern
-; form cannot be expressed against any legacy signature (old readers upgrade
-; the call by name and crash on the missing argument). The markers are pure
-; optimization hints and are dropped.
+; form cannot be expressed against the signature older readers know (they
+; upgrade the call by name and crash on the missing argument). The markers are
+; pure optimization hints and are dropped. The 22.0 target keeps them.
 define void @f() {
   %a = alloca [16 x i8]
   call void @llvm.lifetime.start.p0(ptr %a)

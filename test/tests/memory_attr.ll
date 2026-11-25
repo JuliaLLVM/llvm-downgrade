@@ -1,6 +1,6 @@
 ; MIN-LLVM: 16  (the memory(...) attribute is LLVM 16+)
-; VERSIONS: 18.0 20.0
-; LLVM 18 and 20 know the memory(...) attribute natively (the pre-16 targets
+; VERSIONS: 18.0 20.0 22.0
+; LLVM 18 and newer know the memory(...) attribute natively (the pre-16 targets
 ; decompose it into the legacy argmemonly/readonly/... enum attributes, see
 ; memory_attrs.ll).
 define i32 @f(ptr %p) memory(argmem: read) {

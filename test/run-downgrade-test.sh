@@ -13,14 +13,14 @@
 #   ; MAX-LLVM: 16            require host LLVM <= N
 #   ; XFAIL-AS: <substr>      llvm-downgrade is expected to abort with this message
 #   ; XFAIL-DIS-V5: <substr>  the legacy llvm-dis is expected to fail with this
-#   ; XFAIL-DIS-V7/V14/V18/V20: ...
+#   ; XFAIL-DIS-V7/V14/V18/V20/V22: ...
 # FileCheck prefixes: CHECK (common), CHECK-V5 / CHECK-V7 / CHECK-V14 / CHECK-V18
-# / CHECK-V20.
+# / CHECK-V20 / CHECK-V22.
 #
 # Exit codes (for ctest SKIP_RETURN_CODE=77): 0 pass, 1 fail, 77 skipped.
 set -u
 
-TOOL= FILECHECK= HOST_MAJOR= DIS_5= DIS_7= DIS_14= DIS_18= DIS_20= OPT_5= OPT_7= OPT_14= OPT_18= OPT_20= TEST=
+TOOL= FILECHECK= HOST_MAJOR= DIS_5= DIS_7= DIS_14= DIS_18= DIS_20= DIS_22= OPT_5= OPT_7= OPT_14= OPT_18= OPT_20= OPT_22= TEST=
 while [[ $# -gt 0 ]]; do
   case $1 in
     --tool)       TOOL=$2;       shift 2;;
@@ -31,11 +31,13 @@ while [[ $# -gt 0 ]]; do
     --dis-14)     DIS_14=$2;     shift 2;;
     --dis-18)     DIS_18=$2;     shift 2;;
     --dis-20)     DIS_20=$2;     shift 2;;
+    --dis-22)     DIS_22=$2;     shift 2;;
     --opt-5)      OPT_5=$2;      shift 2;;
     --opt-7)      OPT_7=$2;      shift 2;;
     --opt-14)     OPT_14=$2;     shift 2;;
     --opt-18)     OPT_18=$2;     shift 2;;
     --opt-20)     OPT_20=$2;     shift 2;;
+    --opt-22)     OPT_22=$2;     shift 2;;
     *)            TEST=$1;       shift;;
   esac
 done
@@ -55,8 +57,8 @@ if [[ -n $max && $HOST_MAJOR -gt $max ]]; then echo "SKIP $name (needs LLVM <= $
 versions=$(getdir VERSIONS); versions=${versions:-"5.0 7.0"}
 xfail_as=$(getdir XFAIL-AS)
 
-dis_for() { case $1 in 5.0) echo "$DIS_5";; 7.0) echo "$DIS_7";; 14.0) echo "$DIS_14";; 18.0) echo "$DIS_18";; 20.0) echo "$DIS_20";; esac; }
-opt_for() { case $1 in 5.0) echo "$OPT_5";; 7.0) echo "$OPT_7";; 14.0) echo "$OPT_14";; 18.0) echo "$OPT_18";; 20.0) echo "$OPT_20";; esac; }
+dis_for() { case $1 in 5.0) echo "$DIS_5";; 7.0) echo "$DIS_7";; 14.0) echo "$DIS_14";; 18.0) echo "$DIS_18";; 20.0) echo "$DIS_20";; 22.0) echo "$DIS_22";; esac; }
+opt_for() { case $1 in 5.0) echo "$OPT_5";; 7.0) echo "$OPT_7";; 14.0) echo "$OPT_14";; 18.0) echo "$OPT_18";; 20.0) echo "$OPT_20";; 22.0) echo "$OPT_22";; esac; }
 # The verify pass spelling differs between the legacy and new pass managers.
 # -mtriple: stock opt rejects modules with a triple it does not know (air64);
 # the override only affects TargetMachine setup, not IR verification.

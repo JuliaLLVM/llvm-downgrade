@@ -78,6 +78,13 @@ constexpr Target Targets[] = {
        WriteBitcode200ToFile(M, OS);
      }},
 #endif
+#ifdef LLVMDG_HAS_220
+    {"22.0", 22, 0,
+     [](Module &M, raw_ostream &OS) {
+       BitcodeWriter220::prepareModule(M);
+       WriteBitcode220ToFile(M, OS);
+     }},
+#endif
 };
 
 } // namespace

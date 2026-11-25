@@ -1,7 +1,7 @@
 ; VERSIONS: 14.0 18.0 20.0
 ; MIN-LLVM: 21  (DIFixedPointType and DISubrangeType are LLVM 21+)
 ; The subrange debug-info type (like DIFixedPointType) has a record code the
-; legacy readers do not know (they crash on it), so it is rejected.
+; pre-21 readers do not know (they crash on it), so it is rejected.
 ; XFAIL-AS: DISubrangeType is not supported
 define void @f() !dbg !5 {
   ret void, !dbg !9

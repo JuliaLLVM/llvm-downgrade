@@ -47,6 +47,9 @@ endif()
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/BitcodeWriter200.cpp)
   add_compile_definitions(LLVMDG_HAS_200)
 endif()
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/BitcodeWriter220.cpp)
+  add_compile_definitions(LLVMDG_HAS_220)
+endif()
 
 # The tool links the shared library when enabled, or embeds the writers.
 option(LLVMDG_BUILD_LIBRARY "Build the libllvm_downgrade shared library" ON)
