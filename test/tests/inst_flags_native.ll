@@ -1,7 +1,7 @@
-; VERSIONS: 20.0
+; VERSIONS: 20.0 22.0
 ; MIN-LLVM: 20
 ; The poison-generating flags introduced up to LLVM 20 (disjoint, nneg,
-; uitofp nneg, samesign, trunc/GEP nuw+nusw) encode natively on the 20.0 target (compare
+; uitofp nneg, samesign, trunc/GEP nuw+nusw) encode natively on the 20.0 and 22.0 targets (compare
 ; inst_flags.ll, where the older targets drop them).
 define i64 @f(i32 %x, i32 %y, ptr %p, ptr %q) {
   %a = add nuw nsw i32 %x, %y

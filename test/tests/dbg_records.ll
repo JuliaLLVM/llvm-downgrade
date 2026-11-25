@@ -1,6 +1,6 @@
-; VERSIONS: 20.0
+; VERSIONS: 20.0 22.0
 ; Variable-location debug records (#dbg_value/#dbg_declare/#dbg_assign) encode
-; natively on the 20.0 target (LLVM 19 introduced the record form); the older
+; natively on the 20.0 and 22.0 targets (LLVM 19 introduced the record form); the older
 ; targets drop them, see dbg_line_info.ll.
 define i32 @f(i32 %x) !dbg !5 {
   %p = alloca i32, !dbg !9
