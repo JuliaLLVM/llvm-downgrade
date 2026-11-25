@@ -105,6 +105,17 @@ static AttributeList stripUnsupportedAttrs(LLVMContext &C, AttributeList AL,
   return AL;
 }
 
+// LLVM 19 allowed floating-point vectors as atomicrmw operands. The LLVM
+// 18 verifier rejects them, and splitting the operation per element would
+// weaken its atomicity, so fail instead.
+static void rejectVectorAtomics(Function &F) {
+  for (Instruction &I : instructions(F))
+    if (auto *RMW = dyn_cast<AtomicRMWInst>(&I);
+        RMW && RMW->getValOperand()->getType()->isVectorTy())
+      llvmdg::reportError(Twine("atomicrmw on a vector is not supported with "
+                                "LLVM 18"));
+}
+
 bool BitcodeWriter180::prepareModule(Module &M) {
   // LLVM 18 is opaque-pointer-only and supports target extension types,
   // memory(...) and DIAssignID natively, so only attributes that postdate it
@@ -112,6 +123,7 @@ bool BitcodeWriter180::prepareModule(Module &M) {
   bool Changed = llvmdg::lowerHostConstructs(M, 18);
   LLVMContext &C = M.getContext();
   for (Function &F : M) {
+    rejectVectorAtomics(F);
     F.setAttributes(stripUnsupportedAttrs(C, F.getAttributes(), Changed));
     for (Instruction &I : instructions(F))
       if (auto *CB = dyn_cast<CallBase>(&I))

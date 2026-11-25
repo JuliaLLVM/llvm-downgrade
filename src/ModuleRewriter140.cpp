@@ -12,6 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "DowngradeError.h"
 #include "HostLowering.h"
 
 #include "llvm/Bitcode/BitcodeWriter.h"
@@ -20,6 +21,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/InstrTypes.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 using namespace llvm;
@@ -49,12 +51,24 @@ static AttributeList stripUnsupportedAttrs(LLVMContext &C, AttributeList AL,
   return AL;
 }
 
+// LLVM 19 allowed floating-point vectors as atomicrmw operands. The LLVM
+// 14 verifier rejects them, and splitting the operation per element would
+// weaken its atomicity, so fail instead.
+static void rejectVectorAtomics(Function &F) {
+  for (Instruction &I : instructions(F))
+    if (auto *RMW = dyn_cast<AtomicRMWInst>(&I);
+        RMW && RMW->getValOperand()->getType()->isVectorTy())
+      llvmdg::reportError(Twine("atomicrmw on a vector is not supported with "
+                                "LLVM 14"));
+}
+
 bool BitcodeWriter140::prepareModule(Module &M) {
   // Unlike the 5.0/7.0 targets, LLVM 14 natively supports freeze, fneg and the
   // bfloat type, so none of those need to be rewritten.
   bool Changed = llvmdg::lowerHostConstructs(M, 14);
   LLVMContext &C = M.getContext();
   for (Function &F : M) {
+    rejectVectorAtomics(F);
     F.setAttributes(stripUnsupportedAttrs(C, F.getAttributes(), Changed));
     for (Instruction &I : instructions(F))
       if (auto *CB = dyn_cast<CallBase>(&I))
